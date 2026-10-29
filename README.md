@@ -60,8 +60,7 @@ i7-1165G7 / Iris Xe 二合一平板电脑上的 macOS Sequoia OpenCore EFI、ACP
 
 ## 版本历史
 
-每个版本只改一个变量，失败的版本也都记录下来。完整表格在 **[CHANGELOG.md](CHANGELOG.md)**，
-每一版都写了改动、为什么改、解决了什么问题和实测结果。下面是主线：
+每个版本只改一个变量。[CHANGELOG.md](CHANGELOG.md) 只收录有实际突破的版本，每条都写明当时卡在哪里、解决思路和具体改动。下面是主线：
 
 | 阶段 | 版本 | 卡在哪里 | 怎么解决的 |
 |---|---|---|---|
@@ -78,19 +77,20 @@ i7-1165G7 / Iris Xe 二合一平板电脑上的 macOS Sequoia OpenCore EFI、ACP
 
 ### 按症状查
 
-| 你遇到的现象 | 先看 |
+| 你遇到的现象 | CHANGELOG 里看 |
 |---|---|
-| 卡在 `EXITBS:START` | v0.1.2–v0.1.11：MAT 组合、`DevirtualiseMmio`、quirks 对齐 |
-| Recovery / 安装界面键鼠没反应 | v0.1.15：先放 USBToolBox + 临时全开映射 |
-| `SetupTimings+0x159` 或 `computeWatermarkValue` 除零 panic | v0.1.23–v0.1.33、B′ 基线；`patches/WhateverXe` 的 `-wex-tgl-sdt-guard` |
-| 开机偶发 `setupPipeWatermarks` panic、关屏后 `PG2 power well` panic | v0.1.42 之前的未编号行：改用 0.5.0 重写的最小补丁 |
-| 关屏后再点亮黑屏 | v0.1.42：`-noDC9 -nodisplaysleepDC6 -wex-no-panel-keep -wex-sink-rate-restore` |
-| 亮度滑块无效 | SSDT-PNLF 必须挂在 `\_SB.PC00.GFX0`（本机根桥叫 `PC00`） |
-| 音频设备为空，或 layout 改了不生效 | v0.1.37–v0.1.40 及未编号行：`alcapplid` 才决定 AppleHDA 实际用的 layout |
-| 耳机有声、扬声器无声 | v0.1.43–v0.1.45：coef `0x10` |
-| 电池不显示 | 需要 SMCBatteryManager **加** ECEnabler |
-| 电源键无效 | v0.1.46–v0.1.50；调查过程见 `docs/research/power-button-20261026.md` |
-| 触摸 CPU 占用高、或笔不工作 | v0.1.51–v0.1.52 |
+| 卡在 `EXITBS:START` | v0.1.11：拿同 CPU 能用的 EFI 成组对齐 quirks |
+| 进内核后 page fault / 重启 | v0.1.14：固件不支持 MAT 时用无 MAT 的 Booter 组合 |
+| Recovery / 安装界面键鼠没反应 | v0.1.15：USBToolBox + 临时全开映射 |
+| `SetupTimings+0x159` 或 `computeWatermarkValue` 除零 panic | v0.1.33、B′ 基线：写回已验证的时序 |
+| 开机偶发 `setupPipeWatermarks` panic、关屏后 `PG2 power well` panic | 未编号（10-27）：基于 0.5.0 源码的最小补丁 |
+| 关屏后再点亮黑屏 | v0.1.42：绕开 DC9/DC6 + 写回 DPCD `0x115` |
+| 亮度滑块无效 | 未编号（10-27）：SSDT-PNLF 挂在 `\_SB.PC00.GFX0` |
+| layout 改了不生效、扬声器无声 | v0.1.44：`alcapplid` 与 coef `0x10` |
+| 电池不显示 | 未编号（10-26）：SMCBatteryManager **加** ECEnabler |
+| 电源键无效 | v0.1.50：`_REG` 时读一遍 EC RAM |
+| 笔不工作 | v0.1.51：VoodooI2C 2.9.1 |
+| 触摸 CPU 占用高（轮询） | v0.1.52：Tiger Lake LP 的 VoodooGPIO |
 
 ## 目录
 
@@ -111,7 +111,7 @@ thirdparty.lock           第三方发布包的 URL / SHA-256，以及每个文�
 EFI-sha256.txt            v0.1.55 EFI 中每个文件的 SHA-256（config.plist 除外）
 tools/                    macOS 下用的小工具（电源键面板、USB 插拔监视、手写笔报告抓取、电池功耗）
 docs/                     硬件信息与各子系统的调查记录
-CHANGELOG.md              逐版本记录
+CHANGELOG.md              各次突破的问题、思路和改动
 THIRD_PARTY.md            第三方组件、版本和许可证
 ```
 

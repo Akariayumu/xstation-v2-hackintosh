@@ -43,7 +43,7 @@
 
 ## 4. BIOS 设置
 
-- DVMT Pre-Allocated：出厂 60 MB，适配时改为 **96 MB**（WhateverXe 推荐 96 MB 以上，见 CHANGELOG v0.1.19）。
+- DVMT Pre-Allocated：出厂 60 MB，适配时改为 **96 MB**（WhateverXe 推荐 96 MB 以上）。
 - CFG Lock：开启，BIOS 里没有改。OpenCore 用 `AppleXcpmCfgLock` 处理。
 - Secure Boot：关闭。
 - VT-d、Above 4G Decoding：开启。BIOS 没有 CSM 选项。
