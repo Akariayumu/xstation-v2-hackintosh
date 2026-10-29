@@ -1,2 +1,26 @@
 .cache/
 .DS_Store
+
+# scripts/fetch-thirdparty.sh 下载的第三方文件，不要提交（见 THIRD_PARTY.md）
+/EFI/BOOT/BOOTx64.efi
+/EFI/OC/Drivers/HfsPlus.efi
+/EFI/OC/Drivers/OpenRuntime.efi
+/EFI/OC/Drivers/ResetNvramEntry.efi
+/EFI/OC/Kexts/AMFIPass.kext/
+/EFI/OC/Kexts/AirportItlwm.kext/
+/EFI/OC/Kexts/AppleALC.kext/Contents/MacOS/AppleALC
+/EFI/OC/Kexts/BlueToolFixup.kext/
+/EFI/OC/Kexts/ECEnabler.kext/
+/EFI/OC/Kexts/IntelBTPatcher.kext/
+/EFI/OC/Kexts/IntelBluetoothFirmware.kext/
+/EFI/OC/Kexts/Lilu.kext/
+/EFI/OC/Kexts/NVMeFix.kext/
+/EFI/OC/Kexts/SMCBatteryManager.kext/
+/EFI/OC/Kexts/USBToolBox.kext/
+/EFI/OC/Kexts/VirtualSMC.kext/
+/EFI/OC/Kexts/VoodooI2C.kext/Contents/MacOS/VoodooI2C
+/EFI/OC/Kexts/VoodooI2C.kext/Contents/PlugIns/VoodooI2CServices.kext/
+/EFI/OC/Kexts/VoodooI2C.kext/Contents/PlugIns/VoodooInput.kext/
+/EFI/OC/Kexts/VoodooI2CHID.kext/
+/EFI/OC/Kexts/VoodooPS2Controller.kext/
+/EFI/OC/OpenCore.efi
