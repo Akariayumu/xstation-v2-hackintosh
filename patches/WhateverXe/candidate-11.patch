@@ -1,0 +1,1412 @@
+diff -ruN '--exclude=build' base/WhateverXe/kern_tgl_backlight_trace.hpp cand11/WhateverXe/kern_tgl_backlight_trace.hpp
+--- base/WhateverXe/kern_tgl_backlight_trace.hpp	1970-01-01 09:00:00.000000000 +0900
++++ cand11/WhateverXe/kern_tgl_backlight_trace.hpp	2026-10-27 21:38:05.000000000 +0900
+@@ -0,0 +1,37 @@
++// Record-only trace of the four panel backlight registers the donor touches on
++// display-off (disableDisplay) and display-on (LightUpEDP): BLC_PWM_CTL
++// (0xC8250), BLC_PWM_FREQ (0xC8254), BLC_PWM_DUTY (0xC8258) and PP_CONTROL
++// (0xC7204). Each native write is appended after it has executed, with the
++// caller's image offset and a readback of CTL and PP_CONTROL. The ring keeps
++// the newest events. Nothing here issues a write or changes a donor decision.
++#ifndef KERN_TGL_BACKLIGHT_TRACE_HPP
++#define KERN_TGL_BACKLIGHT_TRACE_HPP
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++struct TGLBacklightTrace {
++ static constexpr uint32_t capacity=32;
++ struct Event {uint32_t seq,reg,value,caller,ctl,pp;uint64_t ns;};
++ static constexpr size_t bytes=8+size_t(capacity)*sizeof(Event);
++ static bool interesting(unsigned long reg) {return reg==0xC8250 || reg==0xC8254 || reg==0xC8258 || reg==0xC7204;}
++ uint32_t count {};
++ Event ring[capacity] {};
++ void push(uint32_t reg,uint32_t value,uint32_t caller,uint32_t ctl,uint32_t pp,uint64_t ns) {
++  const auto seq=__sync_fetch_and_add(&count,1);
++  Event e{seq+1,reg,value,caller,ctl,pp,ns};
++  ring[seq%capacity]=e;
++ }
++ // Layout: u32 count, u32 capacity, then the retained events oldest first.
++ void encode(uint8_t *out) const {
++  const uint32_t n=count,cap=capacity;
++  memcpy(out,&n,4);memcpy(out+4,&cap,4);
++  const uint32_t kept=n<cap ? n : cap;
++  for(uint32_t i=0;i<kept;i++) {
++   const uint32_t first=n<cap ? 0 : n-cap;
++   memcpy(out+8+size_t(i)*sizeof(Event),&ring[(first+i)%cap],sizeof(Event));
++  }
++  for(uint32_t i=kept;i<cap;i++)memset(out+8+size_t(i)*sizeof(Event),0,sizeof(Event));
++ }
++};
++static_assert(sizeof(TGLBacklightTrace::Event)==32,"event layout");
++#endif
+diff -ruN '--exclude=build' base/WhateverXe/kern_tgl_display_on_trace.hpp cand11/WhateverXe/kern_tgl_display_on_trace.hpp
+--- base/WhateverXe/kern_tgl_display_on_trace.hpp	1970-01-01 09:00:00.000000000 +0900
++++ cand11/WhateverXe/kern_tgl_display_on_trace.hpp	2026-10-27 22:25:10.000000000 +0900
+@@ -0,0 +1,50 @@
++// Record-only trace for the display-off/on path: at every backlight register
++// write, at (rate-limited) failed AUX transactions and at every link training
++// return on the observed controller, read back the registers that decide
++// whether the eDP AUX channel can work at all (AUX power well request/state,
++// display power well 2, panel power status and control, combo PHY A lane
++// control, DDI_A buffer control, south HPD live state, PHY A misc power).
++// Reads only, newest events retained. Nothing here issues a write or changes
++// a donor decision.
++#ifndef KERN_TGL_DISPLAY_ON_TRACE_HPP
++#define KERN_TGL_DISPLAY_ON_TRACE_HPP
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++struct TGLDisplayOnTrace {
++ static constexpr uint32_t capacity=64;
++ enum Kind : uint32_t {BacklightWrite=1,AUXFailure=2,TrainingReturn=3,PanelPowerKeep=4,AUXSuccess=5};
++ struct Event {
++  uint32_t seq,kind,reg,value,caller;
++  uint32_t auxCtl,pwrAux,pwr2,ppStatus,ppControl,phyDW12,ddiBuf,hpd,phyMisc;
++  uint64_t ns;
++ };
++ static constexpr size_t bytes=8+size_t(capacity)*sizeof(Event);
++ // Registers read back after the event. AUX_CTL is per port (port+0x594).
++ static constexpr uint32_t regPwrAux=0x45444,regPwr2=0x45404,regPPStatus=0xC7200,regPPControl=0xC7204,
++  regPhyDW12=0x162030,regDDIBuf=0x64000,regHPD=0xC4000,regPhyMisc=0x64C00;
++ // AUX results are rate limited: the first `auxBurst` after a reset (training
++ // enter) are kept, then one in `auxEvery`. Non-AUX kinds are never dropped.
++ static constexpr uint32_t auxBurst=6,auxEvery=32;
++ uint32_t count {},auxSeen {};
++ Event ring[capacity] {};
++ void resetAUXWindow() {auxSeen=0;}
++ bool admitAUX() {
++  const auto n=__sync_fetch_and_add(&auxSeen,1);
++  return n<auxBurst || (n-auxBurst)%auxEvery==auxEvery-1;
++ }
++ void push(const Event &e) {
++  const auto seq=__sync_fetch_and_add(&count,1);
++  Event copy=e;copy.seq=seq+1;ring[seq%capacity]=copy;
++ }
++ // Layout: u32 count, u32 capacity, then the retained events oldest first.
++ void encode(uint8_t *out) const {
++  const uint32_t n=count,cap=capacity;
++  memcpy(out,&n,4);memcpy(out+4,&cap,4);
++  const uint32_t kept=n<cap ? n : cap,first=n<cap ? 0 : n-cap;
++  for(uint32_t i=0;i<kept;i++)memcpy(out+8+size_t(i)*sizeof(Event),&ring[(first+i)%cap],sizeof(Event));
++  for(uint32_t i=kept;i<cap;i++)memset(out+8+size_t(i)*sizeof(Event),0,sizeof(Event));
++ }
++};
++static_assert(sizeof(TGLDisplayOnTrace::Event)==64,"event layout");
++#endif
+diff -ruN '--exclude=build' base/WhateverXe/kern_tgl_power_guard.hpp cand11/WhateverXe/kern_tgl_power_guard.hpp
+--- base/WhateverXe/kern_tgl_power_guard.hpp	1970-01-01 09:00:00.000000000 +0900
++++ cand11/WhateverXe/kern_tgl_power_guard.hpp	2026-10-27 12:44:02.000000000 +0900
+@@ -0,0 +1,32 @@
++// Record-only result of the PG2/3/4 fuse poll. It never changes the value
++// returned to the donor, the poll budget or any power request; a read of
++// all ones is kept apart because the donor's single-bit test accepts it.
++#ifndef KERN_TGL_POWER_GUARD_HPP
++#define KERN_TGL_POWER_GUARD_HPP
++#include "kern_xelp_donor.hpp"
++struct TGLPowerFuseLog {
++ enum Result : uint8_t {Ready,Timeout,InvalidMMIO};
++ // q[well*3+result] counts for PG2/PG3/PG4, q[9+well] maximum elapsed us,
++ // q[12] polls that had to wait, q[13..15] the last event (racy by design).
++ uint64_t q[16] {};
++ static Result classify(uint32_t mask,uint32_t value) {
++  return value==UINT32_MAX ? InvalidMMIO : (value&mask) ? Ready : Timeout;
++ }
++ static unsigned well(uint32_t mask) {
++  for(unsigned i=0;i<3;++i)if(mask==(1U<<(25-i)))return i;
++  return 3;
++ }
++ void record(uint32_t mask,uint32_t initial,const XELPDonor::Poll &poll) {
++  const auto w=well(mask);if(w>2)return;
++  const auto result=classify(mask,poll.value);
++  __atomic_fetch_add(&q[w*3+result],1,__ATOMIC_RELAXED);
++  auto peak=__atomic_load_n(&q[9+w],__ATOMIC_RELAXED);
++  while(poll.elapsedUs>peak && !__atomic_compare_exchange_n(&q[9+w],&peak,uint64_t(poll.elapsedUs),
++        true,__ATOMIC_RELAXED,__ATOMIC_RELAXED)) {}
++  if(poll.reads)__atomic_fetch_add(&q[12],1,__ATOMIC_RELAXED);
++  __atomic_store_n(&q[13],uint64_t(w)|uint64_t(result)<<8|uint64_t(poll.reads)<<16,__ATOMIC_RELAXED);
++  __atomic_store_n(&q[14],uint64_t(initial)<<32|poll.value,__ATOMIC_RELAXED);
++  __atomic_store_n(&q[15],uint64_t(poll.elapsedUs),__ATOMIC_RELAXED);
++ }
++};
++#endif
+diff -ruN '--exclude=build' base/WhateverXe/kern_tgl_sink_state_trace.hpp cand11/WhateverXe/kern_tgl_sink_state_trace.hpp
+--- base/WhateverXe/kern_tgl_sink_state_trace.hpp	1970-01-01 09:00:00.000000000 +0900
++++ cand11/WhateverXe/kern_tgl_sink_state_trace.hpp	2026-10-28 02:41:48.000000000 +0900
+@@ -0,0 +1,100 @@
++// Record-only snapshot of eDP sink (panel) DPCD state taken right before each
++// native link training on the observed internal panel port. The firmware
++// leaves the panel configured at boot; a real panel power cycle resets it to
++// its own defaults. Comparing the boot snapshot with a post-power-cycle one
++// shows which sink state the donor never restores. Only DPCD reads through the
++// donor's own AUX read routine; nothing here writes the sink or the source.
++#ifndef KERN_TGL_SINK_STATE_TRACE_HPP
++#define KERN_TGL_SINK_STATE_TRACE_HPP
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++struct TGLSinkStateTrace {
++ struct Region {uint32_t address,length,offset;};
++ // Receiver caps, link configuration (incl. 0x108 coding, 0x10A eDP config,
++ // 0x115 link rate set), lane status, source OUI, sink power, eDP caps,
++ // eDP display control and the extended receiver caps.
++ static constexpr uint32_t regionCount=9;
++ static constexpr Region regions[regionCount] {
++  {0x0000,16,0},{0x0100,16,16},{0x0110,8,32},{0x0200,8,40},{0x0300,12,48},
++  {0x0600,1,60},{0x0700,8,61},{0x0720,4,69},{0x2200,16,73}};
++ static constexpr uint32_t dataBytes=89;
++ struct Snapshot {
++  uint32_t seq,flags;              // flags bit0: panel power keep, bit1: D0 restore, bit2: OUI restore, bit3: rate select, bit4: rate restore
++  uint64_t ns;
++  uint32_t result[regionCount];    // IOReturn per region, 0xFFFFFFFF = skipped
++  uint32_t reserved;               // explicit padding, always zero
++  uint8_t data[96];                // regions packed at Region::offset
++ };
++ static constexpr uint32_t firstSlots=4,lastSlots=8;
++ static constexpr size_t bytes=8+size_t(firstSlots+lastSlots)*sizeof(Snapshot);
++ uint32_t count {};
++ Snapshot first[firstSlots] {},last[lastSlots] {};
++ // Fills one snapshot. read(address,buffer,length) returns an IOReturn. After
++ // the first failed read the remaining regions are skipped so a sink that does
++ // not answer AUX does not add a timeout per region.
++ template<class Read> static void capture(Snapshot &s,Read read) {
++  bool failed=false;
++  for(uint32_t i=0;i<regionCount;i++) {
++   if(failed){s.result[i]=0xFFFFFFFFU;continue;}
++   const auto &r=regions[i];
++   s.result[i]=read(r.address,s.data+r.offset,r.length);
++   if(s.result[i]){memset(s.data+r.offset,0,r.length);failed=true;}
++  }
++ }
++ // Restores sink bytes a real panel power cycle resets and the donor never
++ // writes back (opt-in experiment, one boot-arg per item). Reads first and
++ // writes only when the sink differs, retrying like Linux intel_dp_set_power.
++ // Returns 0 when already correct, 1 when written, 2 when every try failed,
++ // 3 when the read failed.
++ template<class Read,class Write,class Wait> static uint32_t restore(uint32_t address,const uint8_t *want,
++  uint32_t length,uint32_t tries,Read read,Write write,Wait wait) {
++  uint8_t have[4] {};
++  if(length>sizeof(have) || read(address,have,length))return 3;
++  if(!memcmp(have,want,length))return 0;
++  for(uint32_t i=0;i<tries;i++) {
++   uint8_t copy[4];memcpy(copy,want,length);
++   if(!write(address,copy,length))return 1;
++   wait();
++  }
++  return 2;
++ }
++ static constexpr uint8_t setPowerD0[1] {1};
++ // Intel source OUI, as the firmware (and Linux i915) write it.
++ static constexpr uint8_t sourceOUI[3] {0x00,0xAA,0x01};
++ // eDP 1.4 rate select: index of a LINK_BW_SET code in the sink's
++ // SUPPORTED_LINK_RATES table (DPCD 0x010, 8 little-endian entries in 200 kHz
++ // units, zero-terminated), or noRate when the table does not list it.
++ static constexpr uint8_t noRate=0xFF;
++ static uint8_t rateIndex(const uint8_t table[16],uint8_t bwCode) {
++  const uint32_t want=uint32_t(bwCode)*1350;
++  for(uint8_t i=0;i<8;i++) {
++   const uint32_t v=table[2*i]|(uint32_t(table[2*i+1])<<8);
++   if(!v)break;
++   if(v==want)return i;
++  }
++  return noRate;
++ }
++ void push(const Snapshot &s) {
++  const auto seq=__sync_add_and_fetch(&count,1);
++  Snapshot copy=s;copy.seq=seq;
++  if(seq<=firstSlots)first[seq-1]=copy;
++  last[(seq-1)%lastSlots]=copy;
++ }
++ // Layout: u32 count, u32 (firstSlots<<16|lastSlots), first[] in order, then
++ // the retained last[] oldest first; unused slots are zero.
++ void encode(uint8_t *out) const {
++  const uint32_t n=count,shape=(firstSlots<<16)|lastSlots;
++  memcpy(out,&n,4);memcpy(out+4,&shape,4);
++  auto p=out+8;
++  for(uint32_t i=0;i<firstSlots;i++,p+=sizeof(Snapshot)) {
++   if(i<n)memcpy(p,&first[i],sizeof(Snapshot));else memset(p,0,sizeof(Snapshot));
++  }
++  const uint32_t kept=n<lastSlots?n:lastSlots,start=n<lastSlots?0:n-lastSlots;
++  for(uint32_t i=0;i<lastSlots;i++,p+=sizeof(Snapshot)) {
++   if(i<kept)memcpy(p,&last[(start+i)%lastSlots],sizeof(Snapshot));else memset(p,0,sizeof(Snapshot));
++  }
++ }
++};
++static_assert(sizeof(TGLSinkStateTrace::Snapshot)==152,"snapshot layout");
++#endif
+diff -ruN '--exclude=build' base/WhateverXe/kern_tgl_timing_guard.hpp cand11/WhateverXe/kern_tgl_timing_guard.hpp
+--- base/WhateverXe/kern_tgl_timing_guard.hpp	1970-01-01 09:00:00.000000000 +0900
++++ cand11/WhateverXe/kern_tgl_timing_guard.hpp	2026-10-27 12:27:00.000000000 +0900
+@@ -0,0 +1,37 @@
++// Output guard for AppleIntelFramebuffer::setupDisplayTiming. The donor
++// returns void and writes nothing when its AGDC timing request fails or
++// yields an out-of-range index, yet setDisplayMode programs that output.
++// Every successful donor path writes the three probe fields below.
++#ifndef KERN_TGL_TIMING_GUARD_HPP
++#define KERN_TGL_TIMING_GUARD_HPP
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++struct TGLTimingGuard {
++ static constexpr size_t size=0xA0; // IODetailedTimingInformationV2
++ enum Outcome : uint8_t {Native,Repaired,Inconsistent};
++ // 0xFE in every byte: pixelClock above 18 EHz, active sizes above 4G.
++ static constexpr uint8_t mark=0xFE;
++ static bool applicable(const uint8_t *in,const uint8_t *out) {
++  return in && out && (in+size<=out || out+size<=in);
++ }
++ static void arm(uint8_t *out) {
++  const size_t probe[3][2]={{0x28,8},{0x40,4},{0x50,4}}; // pixelClock, horizontal/verticalActive
++  for(auto &p:probe)memset(out+p[0],mark,p[1]);
++ }
++ static Outcome settle(uint8_t *out,const uint8_t *in) {
++  const size_t probe[3][2]={{0x28,8},{0x40,4},{0x50,4}};
++  unsigned kept=0;
++  for(auto &p:probe) {
++   bool same=true;
++   for(size_t i=0;i<p[1];++i)same=same && out[p[0]+i]==mark;
++   kept+=same;
++  }
++  if(!kept)return Native;
++  // Same result as the donor's own pass-through branch: the caller's
++  // validated timing for this request, never an older snapshot.
++  memcpy(out,in,size);
++  return kept==3 ? Repaired : Inconsistent;
++ }
++};
++#endif
+diff -ruN '--exclude=build' base/WhateverXe/kern_tgl_wake_index.hpp cand11/WhateverXe/kern_tgl_wake_index.hpp
+--- base/WhateverXe/kern_tgl_wake_index.hpp	1970-01-01 09:00:00.000000000 +0900
++++ cand11/WhateverXe/kern_tgl_wake_index.hpp	2026-10-27 20:40:07.000000000 +0900
+@@ -0,0 +1,48 @@
++// Record-only snapshot of the framebuffer state that prepareToEnterWake and
++// recoverDPLink consult instead of calling setupDisplayTiming: the AGDC entry
++// index (fb+0x3FD8), the flag bytes that select the rebuild path, the mode id
++// handed to validateDisplayMode, and the timing stored in the indexed entry.
++// Nothing here writes to the framebuffer or changes any donor decision.
++#ifndef KERN_TGL_WAKE_INDEX_HPP
++#define KERN_TGL_WAKE_INDEX_HPP
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++struct TGLWakeIndex {
++ // Donor wake logic: idx==-1 selects fb+0x1E6, otherwise fb+0x1E4. A set flag
++ // rebuilds the timing from entry idx (path A; idx==-1 reads before the
++ // object, A1); a clear flag re-validates fb+0x4250 (path B).
++ enum Path : uint8_t {B,A,A1,Unknown};
++ static constexpr size_t entryStride=0x3DC,entryBase=0x2A5; // out[k] <- fb[base+idx*stride+k]
++ struct Snapshot {
++  int32_t index;uint32_t entries;uint8_t flag1E4,flag1E6,flag1EA;uint32_t mode;
++  uint64_t entryClock;uint32_t entryH,entryV;
++ };
++ static Snapshot take(const uint8_t *fb) {
++  Snapshot s {};
++  memcpy(&s.index,fb+0x3FD8,4);memcpy(&s.entries,fb+0x209,4);
++  s.flag1E4=fb[0x1E4];s.flag1E6=fb[0x1E6];s.flag1EA=fb[0x1EA];
++  memcpy(&s.mode,fb+0x4250,4);
++  if(s.index>=0 && uint32_t(s.index)<s.entries) {
++   const auto e=fb+entryBase+size_t(s.index)*entryStride;
++   memcpy(&s.entryClock,e+0x28,8);memcpy(&s.entryH,e+0x40,4);memcpy(&s.entryV,e+0x50,4);
++  }
++  return s;
++ }
++ static Path predict(const Snapshot &s) {
++  if(s.index==-1)return s.flag1E6 ? A1 : B;
++  if(!s.flag1E4)return B;
++  if(s.index<0)return A1; // any negative index rebuilds from before the object
++  return uint32_t(s.index)<s.entries ? A : Unknown;
++ }
++ // 8 x uint64: index before/after, flags, mode|entries, entry timing, native count, paths.
++ static void encode(uint64_t r[8],const Snapshot &before,const Snapshot &after,uint32_t nativeCount) {
++  r[0]=uint64_t(int64_t(before.index));r[1]=uint64_t(int64_t(after.index));
++  r[2]=uint64_t(before.flag1E4)|uint64_t(before.flag1E6)<<8|uint64_t(before.flag1EA)<<16|
++       uint64_t(after.flag1E4)<<24|uint64_t(after.flag1E6)<<32|uint64_t(after.flag1EA)<<40;
++  r[3]=uint64_t(after.mode)|uint64_t(after.entries)<<32;
++  r[4]=after.entryClock;r[5]=uint64_t(after.entryH)|uint64_t(after.entryV)<<32;
++  r[6]=nativeCount;r[7]=uint64_t(predict(after))|uint64_t(predict(before))<<8;
++ }
++};
++#endif
+diff -ruN '--exclude=build' base/WhateverXe/kern_xe.cpp cand11/WhateverXe/kern_xe.cpp
+--- base/WhateverXe/kern_xe.cpp	2026-10-24 16:53:54.000000000 +0900
++++ cand11/WhateverXe/kern_xe.cpp	2026-10-28 02:41:48.000000000 +0900
+@@ -29,6 +29,12 @@
+ #include "kern_tgl_port_map.hpp"
+ #include "kern_tgl_combo_signal.hpp"
+ #include "kern_tgl_panel_depth.hpp"
++#include "kern_tgl_timing_guard.hpp"
++#include "kern_tgl_wake_index.hpp"
++#include "kern_tgl_backlight_trace.hpp"
++#include "kern_tgl_display_on_trace.hpp"
++#include "kern_tgl_sink_state_trace.hpp"
++#include "kern_tgl_power_guard.hpp"
+ #include "kern_xelp_panel_power.hpp"
+ #include "kern_tgl_pcode_gate.hpp"
+ #include "kern_tgl_pcode_edram.hpp"
+@@ -94,6 +100,8 @@
+ // pre-STOP value/ACK/valid. Sequential receipt, not an atomic GPU snapshot.
+ static uint64_t tglGSYNCState[16] {1},tglGSYNCFailure[16] {};
+ static bool tglGSYNCSerialize(void *,void *,OSSerialize *);
++static bool tglPowerFuseSerialize(void *,void *,OSSerialize *);
++static TGLPowerFuseLog tglPowerFuseLog; // PG2/3/4 poll results, read through TGLPowerFuseLive
+ static bool tglRPCSPowerReady;
+ static uint32_t tglRPCSPowerWriter;
+ static TGLRPCS::State tglRPCSPowerState{},tglRPCSPowerFailure{};
+@@ -3025,12 +3033,37 @@
+ TGLConnectionRecord tglConnectionLast[tglConnectionEvents][tglConnectionCapacity] {};
+ uint32_t tglConnectionCounts[tglConnectionEvents] {}, tglConnectionSequence {};
+ 
++// Newest backlight register writes (display-off/on), see kern_tgl_backlight_trace.hpp.
++TGLBacklightTrace tglBacklightTrace;
+ uint32_t tglConnectionCaller(void *caller) {
+ 	const auto pc = reinterpret_cast<uintptr_t>(caller);
+ 	return pc >= tglConnectionImage && pc - tglConnectionImage < tglConnectionImageSize
+ 		? static_cast<uint32_t>(pc - tglConnectionImage) : 0xFFFFFFFFU;
+ }
+ 
++// Display-on readback trace (record-only), see kern_tgl_display_on_trace.hpp.
++TGLDisplayOnTrace tglDisplayOnTrace;
++TGLSinkStateTrace tglSinkStateTrace;
++// -wex-no-panel-keep: leave the donor panel power-down untouched (experiment
++// switch; default keeps the panel powered).
++bool tglPanelKeepDisabled;
++// -wex-sink-d0 / -wex-sink-oui: before native training on the internal panel,
++// restore DPCD SET_POWER D0 / the Intel source OUI when the sink lost them.
++bool tglSinkRestoreD0,tglSinkRestoreOUI;
++// -wex-sink-rate-select: on the internal panel, program the donor's LINK_BW_SET
++// choice as eDP 1.4 rate select (LINK_BW_SET 0 + LINK_RATE_SET index), as the
++// firmware and Linux do.
++bool tglSinkRateSelect;
++// LINK_BW_SET code the donor asked for in the last converted write. The donor
++// reads LINK_BW_SET back (hwCRTCToIODetailedTimingInformation) to derive the
++// pixel clock; with rate select the sink holds 0 there, so that readback is
++// answered with this code. WEX's own snapshot reads bypass the translation.
++uint8_t tglRateSelectCode;
++// -wex-sink-rate-restore: restore the LINK_RATE_SET value the firmware left
++// (first snapshot) before each native training when a panel power cycle lost it.
++bool tglSinkRestoreRate;
++
++
+ // Retain issued display programming order independently of cursor/flip traffic.
+ // No MMIO reads, allocations or publication on the native write paths. These
+ // are requests at the wrapper boundary, not proof that hardware latched them.
+@@ -10417,6 +10450,45 @@
+ 				patcher.clearError();
+ 			}
+ 
++			if (tglActive && checkKernelArgument("-wex-tgl-sdt-guard")) {
++				// setupDisplayTiming returns void and writes nothing when the AGDC
++				// timing request fails or its index is out of range; setDisplayMode
++				// still programs that stack output. Exact Sequoia Graphics 0.2.0
++				// donor and physical TGL B0 only. Relocated memmove bytes excluded.
++				const char *symbol="__ZN21AppleIntelFramebuffer18setupDisplayTimingEPK29IODetailedTimingInformationV2PS0_";
++				struct Site {uint32_t offset; uint8_t length, expected[38];};
++				static const Site sites[] {
++					{0x6814C,18,{0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x54,0x53,0x48,0x81,0xEC,0xB0,0x00,0x00,0x00}},
++					// AGDC callback; false skips every output write.
++					{0x68302,38,{0x49,0x8B,0x87,0xD0,0x01,0x00,0x00,0x48,0x8B,0xB8,0x00,0x1C,0x00,0x00,0x4C,0x89,0xE6,0x31,0xD2,0xB9,0x0C,0x00,0x00,0x00,0xFF,0x90,0xF8,0x1B,0x00,0x00,0x84,0xC0,0x0F,0x84,0xDE,0x01,0x00,0x00}},
++					// Index bound; out of range skips every output write.
++					{0x68328,17,{0x48,0x63,0x4D,0xDC,0x41,0x3B,0x8F,0x09,0x02,0x00,0x00,0x0F,0x83,0xF5,0x01,0x00,0x00}},
++					// Native pass-through: memmove(out,in,0xA0).
++					{0x687F9,12,{0xBA,0xA0,0x00,0x00,0x00,0x4C,0x89,0xF7,0x48,0x89,0xDE,0xE8}},
++					{0x688BB,10,{0x8B,0x45,0xDC,0x41,0x89,0x87,0xD8,0x3F,0x00,0x00}},
++					// setDisplayMode: validated timing in, stack output, then hwSetMode.
++					{0x31155,22,{0x48,0x8B,0x75,0xB8,0x4C,0x8D,0xB5,0x08,0xFF,0xFF,0xFF,0x48,0x89,0xDF,0x4C,0x89,0xF2,0xE8,0xE1,0x6F,0x03,0x00}},
++					{0x3117F,18,{0x48,0x8B,0xBB,0xD0,0x01,0x00,0x00,0x48,0x89,0xDE,0x4C,0x89,0xF2,0xE8,0x5B,0x82,0x03,0x00}},
++					// prepareToEnterWake: index -1 selects fb+0x1E6 else fb+0x1E4; clear flag re-validates fb+0x4250.
++					{0x26186,13,{0x45,0x8B,0x85,0xD8,0x3F,0x00,0x00,0x41,0x83,0xF8,0xFF,0x74,0x32}},
++					{0x261CC,16,{0x49,0x8D,0x8D,0xE6,0x01,0x00,0x00,0x80,0x39,0x00,0x0F,0x84,0xA3,0x03,0x00,0x00}},
++					{0x263F1,12,{0x49,0x8B,0x8C,0x05,0xCD,0x02,0x00,0x00,0x48,0x89,0x4A,0x28}},
++					{0x2657F,7,{0x41,0x8B,0xB5,0x50,0x42,0x00,0x00}},
++					// recoverDPLink: same rebuild from entry idx*0x3DC.
++					{0x3BF04,15,{0x48,0x69,0xC0,0xDC,0x03,0x00,0x00,0x41,0x8B,0x8C,0x05,0xB1,0x02,0x00,0x00}},
++				};
++				const auto target=patcher.solveSymbol(index,symbol,address,size);
++				bool known=size>0x688C5 && target==address+0x6814C && XELP::kernelOS(version)==XELP::OS::Sequoia &&
++					xeProfile.identity==0x9A498086 && xeProfile.revision==1 && !xeProfile.overridden();
++				for (auto &site : sites)
++					known=known && !memcmp(reinterpret_cast<void *>(address+site.offset),site.expected,site.length);
++				patcher.clearError();
++				KernelPatcher::RouteRequest route(symbol,wrapTGLDisplayTiming,orgTGLDisplayTiming);
++				tglDisplayTimingReady=known && patcher.routeMultiple(index,&route,1,address,size);
++				IORegistryEntry::getRegistryRoot()->setProperty("TGLDisplayTimingGuardReady",tglDisplayTimingReady);
++				patcher.clearError();
++			}
++
+ 			if (tglActive) {
+ 				// The donor copies a complete timing before this callback, then maps
+ 				// its depth and computes lanes/M/N/dither. Clamp that copy, never an
+@@ -10823,6 +10895,9 @@
+ 					XELPDonor::powerWellFuseSites(reinterpret_cast<const uint8_t *>(fn),size-0x5B640);
+ 				if(fuseReady)tglPGFuseWaitFunction=fn;
+ 				IORegistryEntry::getRegistryRoot()->setProperty("TGLPG234PollReady",fuseReady);
++				if(fuseReady)if(auto live=OSSerializer::forTarget(nullptr,tglPowerFuseSerialize)) {
++					IORegistryEntry::getRegistryRoot()->setProperty("TGLPowerFuseLive",live);live->release();
++				}
+ 				if(!fuseReady)SYSLOG("igfx","PG2/3/4 fuse wait: donor sites unavailable");
+ 			}
+             if(adlsDisplaySelected) {
+@@ -11136,6 +11211,12 @@
+ 			}
+ 			tglAUXLock = IOSimpleLockAlloc();
+ 			tglDisplayTraceEnabled=checkKernelArgument("-wex-display-trace");
++			tglPanelKeepDisabled=checkKernelArgument("-wex-no-panel-keep");
++			tglSinkRestoreD0=checkKernelArgument("-wex-sink-d0");
++			tglSinkRestoreOUI=checkKernelArgument("-wex-sink-oui");
++			tglSinkRateSelect=checkKernelArgument("-wex-sink-rate-select");
++			tglSinkRestoreRate=checkKernelArgument("-wex-sink-rate-restore");
++			IORegistryEntry::getRegistryRoot()->setProperty("TGLPanelPowerKeepEnabled",!tglPanelKeepDisabled);
+    tglInitTransitionTrace(tglDisplayTraceEnabled);
+ 			if (tglConnectionLock) {
+ 				KernelPatcher::RouteRequest link("__ZN14AppleIntelPort15checkLinkStatusEv",
+@@ -13468,6 +13549,11 @@
+  const bool ok=data->serialize(serializer);data->release();return ok;
+ }
+ 
++static bool tglPowerFuseSerialize(void *,void *,OSSerialize *serializer) {
++ uint64_t q[16];for(unsigned i=0;i<16;++i)q[i]=__atomic_load_n(tglPowerFuseLog.q+i,__ATOMIC_RELAXED);
++ auto data=OSData::withBytes(q,sizeof(q));if(!data)return false;
++ const bool ok=data->serialize(serializer);data->release();return ok;
++}
+ static bool tglGSYNCSerialize(void *,void *,OSSerialize *serializer) {
+  uint64_t q[16];for(unsigned i=0;i<16;++i)q[i]=__atomic_load_n(tglGSYNCState+i,__ATOMIC_RELAXED);
+  auto data=OSData::withBytes(q,sizeof(q));if(!data)return false;
+@@ -14752,12 +14838,33 @@
+ 	}
+ }
+ 
++// Display-on readback sampler (record-only); storage lives beside the other traces.
++void XE::tglDisplayOnSample(uint32_t kind,uint32_t reg,uint32_t value,void *caller,void *port) {
++ auto s=callbackXE;if(!s || !s->tglActive || !s->orgTGLRegisterRead)return;
++ auto ctl=static_cast<uint8_t *>(s->tglObservationController);if(!ctl)return;
++ auto access=*reinterpret_cast<void **>(ctl+0xC40);if(!access)return;
++ const auto read=FunctionCast(wrapTGLRegisterRead,s->orgTGLRegisterRead);
++ TGLDisplayOnTrace::Event e{};
++ e.kind=kind;e.reg=reg;e.value=value;e.caller=tglConnectionCaller(caller);
++ const auto auxReg=port ? *reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(port)+0x594) : 0x64010U;
++ e.auxCtl=read(access,auxReg);
++ e.pwrAux=read(access,TGLDisplayOnTrace::regPwrAux);e.pwr2=read(access,TGLDisplayOnTrace::regPwr2);
++ e.ppStatus=read(access,TGLDisplayOnTrace::regPPStatus);e.ppControl=read(access,TGLDisplayOnTrace::regPPControl);
++ e.phyDW12=read(access,TGLDisplayOnTrace::regPhyDW12);e.ddiBuf=read(access,TGLDisplayOnTrace::regDDIBuf);
++ e.hpd=read(access,TGLDisplayOnTrace::regHPD);e.phyMisc=read(access,TGLDisplayOnTrace::regPhyMisc);
++ uint64_t uptime{};clock_get_uptime(&uptime);absolutetime_to_nanoseconds(uptime,&e.ns);
++ tglDisplayOnTrace.push(e);
++ uint8_t out[TGLDisplayOnTrace::bytes];tglDisplayOnTrace.encode(out);
++ IORegistryEntry::getRegistryRoot()->setProperty("TGLDisplayOnTrace",out,sizeof(out));
++}
++
+ uint32_t XE::wrapTGLRunAUX(void *port, uint32_t command, uint32_t *packet, uint32_t length, bool flag) {
+ 	const auto header = packet && length >= 4 ? packet[0] : 0;
+ 	const uint32_t args = length | (static_cast<uint32_t>(flag) << 16);
+ 	tglAUXRecord(port, 0, false, 0, command, args, header, header);
+ 	const auto result = FunctionCast(wrapTGLRunAUX, callbackXE->orgTGLRunAUX)(port, command, packet, length, flag);
+ 	tglAUXRecord(port, 0, true, result, command, args, header, packet && length >= 4 ? packet[0] : 0);
++ if(tglDisplayOnTrace.admitAUX())tglDisplayOnSample(result ? TGLDisplayOnTrace::AUXFailure : TGLDisplayOnTrace::AUXSuccess,command,result,__builtin_return_address(0),port);
+ 	return result;
+ }
+ 
+@@ -15012,7 +15119,9 @@
+ 				void delayUs(unsigned us){IODelay(us);}
+ 				uint32_t readStatus(){return read(access,0x42000);}
+ 			} io {access,reinterpret_cast<uint32_t (*)(void *,unsigned long)>(s->orgTGLRegisterRead)};
+-			value=XELPDonor::waitPowerWellFuse(io,value,mask).value;
++			const auto poll=XELPDonor::waitPowerWellFuse(io,value,mask);
++			tglPowerFuseLog.record(mask,value,poll);
++			value=poll.value;
+ 		}
+ 	}
+ 	if (reg == 0x42000 && s->tglPG1FuseReadCaller && caller == s->tglPG1FuseReadCaller) {
+@@ -15155,6 +15264,31 @@
+ 	return result;
+ }
+ 
++void XE::wrapTGLDisplayTiming(void *fb,const void *in,void *out) {
++ auto s=callbackXE;auto b=static_cast<uint8_t *>(fb);
++ auto i=static_cast<const uint8_t *>(in);auto o=static_cast<uint8_t *>(out);
++ const auto org=FunctionCast(wrapTGLDisplayTiming,s->orgTGLDisplayTiming);
++ if(!b || !TGLTimingGuard::applicable(i,o) || !s->tglObservationController ||
++    *reinterpret_cast<void **>(b+0x1D0)!=s->tglObservationController) {
++  __atomic_fetch_add(&s->tglDisplayTimingCounts[3],1,__ATOMIC_RELAXED);
++  return org(fb,in,out);
++ }
++ const auto before=TGLWakeIndex::take(b);
++ TGLTimingGuard::arm(o);org(fb,in,out);
++ const auto outcome=TGLTimingGuard::settle(o,i);
++ __atomic_fetch_add(&s->tglDisplayTimingCounts[outcome],1,__ATOMIC_RELAXED);
++ // Record-only: the state the wake paths will rebuild from (B5).
++ uint64_t wake[8];
++ TGLWakeIndex::encode(wake,before,TGLWakeIndex::take(b),s->tglDisplayTimingCounts[TGLTimingGuard::Native]);
++ IORegistryEntry::getRegistryRoot()->setProperty("TGLWakeIndexLast",wake,sizeof(wake));
++ if(outcome==TGLTimingGuard::Native)return;
++ // Rare: publish what replaced the missing donor output.
++ uint64_t record[7]={outcome,*reinterpret_cast<uint32_t *>(b+0x1DC),*reinterpret_cast<const uint64_t *>(i+0x28),
++  *reinterpret_cast<const uint32_t *>(i+0x40),*reinterpret_cast<const uint32_t *>(i+0x50),
++  s->tglDisplayTimingCounts[TGLTimingGuard::Repaired],s->tglDisplayTimingCounts[TGLTimingGuard::Inconsistent]};
++ IORegistryEntry::getRegistryRoot()->setProperty("TGLDisplayTimingGuardLast",record,sizeof(record));
++}
++
+ // Successful base reads belong to a concrete port, not an FB index. Clear
+ // failed/invalid reads so old EDID cannot constrain a replacement connection.
+ struct TGLPanelDepthCache {void *port {}; uint32_t maximum {};};
+@@ -16233,6 +16367,16 @@
+ 	}
+ }
+ 
++// The observed controller's internal panel port (DDI A, eDP).
++static bool tglInternalPanelPort(void *port,bool active,void *controller) {
++ if (!port || !active)return false;
++ auto p=static_cast<uint8_t *>(port);
++ auto config=*reinterpret_cast<uint32_t **>(p+0x548);
++ auto ctl=static_cast<uint8_t *>(controller);
++ return config && config[0]==0 && config[2]==0 && ctl && *reinterpret_cast<void **>(p+0x578) &&
++  *reinterpret_cast<void **>(p+0x578)==*reinterpret_cast<void **>(ctl+0xC40);
++}
++
+ uint32_t XE::wrapTGLPortTraining(void *port, void *request) {
+ 	// Clamp before native normal/fast training programs either endpoint.
+ 	// Keep explicit disabled framing and never infer capability from a model.
+@@ -16252,6 +16396,54 @@
+ 		}
+ 	}
+  tglAUXRecord(port,10,false,0,0,0);
++ // Record-only: snapshot the internal panel's DPCD state before native
++ // training (reads through the donor's own AUX read; no writes).
++ if (callbackXE->orgTGLReadAUX) {
++  if (tglInternalPanelPort(port,callbackXE->tglActive,callbackXE->tglObservationController)) {
++   TGLSinkStateTrace::Snapshot snap {};
++   snap.flags=(tglPanelKeepDisabled?0U:1U)|(tglSinkRestoreD0?2U:0U)|(tglSinkRestoreOUI?4U:0U)|(tglSinkRateSelect?8U:0U)|(tglSinkRestoreRate?16U:0U);
++   uint64_t ticks;clock_get_uptime(&ticks);absolutetime_to_nanoseconds(ticks,&snap.ns);
++   TGLSinkStateTrace::capture(snap,[&](uint32_t address,uint8_t *buffer,uint32_t length) {
++    return FunctionCast(wrapTGLReadAUX,callbackXE->orgTGLReadAUX)(port,address,buffer,length);
++   });
++   tglSinkStateTrace.push(snap);
++   if (auto out=static_cast<uint8_t *>(IOMalloc(TGLSinkStateTrace::bytes))) {
++    tglSinkStateTrace.encode(out);
++    IORegistryEntry::getRegistryRoot()->setProperty("TGLSinkStateTrace",out,uint32_t(TGLSinkStateTrace::bytes));
++    IOFree(out,TGLSinkStateTrace::bytes);
++   }
++   // Opt-in restores, in Linux order (source OUI, then D0). Writes go through
++   // the WEX AUX wrapper so the DPCD record shows them.
++   auto read=[&](uint32_t address,uint8_t *buffer,uint32_t length) {
++    return FunctionCast(wrapTGLReadAUX,callbackXE->orgTGLReadAUX)(port,address,buffer,length);
++   };
++   auto write=[&](uint32_t address,uint8_t *buffer,uint32_t length) {return wrapTGLWriteAUX(port,address,buffer,length);};
++   auto wait=[] {IOSleep(1);};
++   // Published value: top byte = latest outcome (0 ok, 1 written, 2 write
++   // failed, 3 read failed), low 24 bits = how often that outcome occurred.
++   static uint32_t restores[2][4];
++   if (tglSinkRestoreOUI) {
++    const auto r=TGLSinkStateTrace::restore(0x300,TGLSinkStateTrace::sourceOUI,3,3,read,write,wait);
++    IORegistryEntry::getRegistryRoot()->setProperty("TGLSinkRestoreOUI",__sync_add_and_fetch(&restores[0][r],1)|(r<<24),32);
++   }
++   if (tglSinkRestoreD0) {
++    const auto r=TGLSinkStateTrace::restore(0x600,TGLSinkStateTrace::setPowerD0,1,3,read,write,wait);
++    IORegistryEntry::getRegistryRoot()->setProperty("TGLSinkRestoreD0",__sync_add_and_fetch(&restores[1][r],1)|(r<<24),32);
++   }
++   static int16_t firmwareRate=-1;
++   if (firmwareRate<0) {
++    firmwareRate=snap.result[2]?0:snap.data[TGLSinkStateTrace::regions[2].offset+5];
++    IORegistryEntry::getRegistryRoot()->setProperty("TGLSinkFirmwareLinkRateSet",uint32_t(firmwareRate),32);
++   }
++   if (tglSinkRestoreRate && firmwareRate>0) {
++    const uint8_t want[1] {uint8_t(firmwareRate)};
++    const auto r=TGLSinkStateTrace::restore(0x115,want,1,3,read,write,wait);
++    static uint32_t rateRestores[4];
++    IORegistryEntry::getRegistryRoot()->setProperty("TGLSinkRestoreRate",__sync_add_and_fetch(&rateRestores[r],1)|(r<<24),32);
++   }
++  }
++ }
++ tglDisplayOnTrace.resetAUXWindow();
+ 	SYSLOG("igfx", "TGL330 port-training enter");
+ 	auto caller = __builtin_return_address(0);
+ 	tglObservePath(port, nullptr, 0, false, 0, request != nullptr, caller);
+@@ -16260,6 +16452,7 @@
+ 	tglTrainingScopes.leave(token);
+  tglAUXRecord(port,10,true,r,0,0);
+ 	SYSLOG("igfx", "TGL330 port-training return result=%x", r);
++ tglDisplayOnSample(TGLDisplayOnTrace::TrainingReturn,0,r,caller,port);
+ 	static uint32_t count {};
+ 	IORegistryEntry::getRegistryRoot()->setProperty("TGLQuietTrainingCalls",
+ 		__sync_add_and_fetch(&count, 1), 32);
+@@ -16708,6 +16901,28 @@
+ 		tx.value = value; tx.pending = true;
+ 		return; // record the actual write later, immediately before power teardown
+ 	}
++	// TGL_PANEL_POWER_KEEP: on this panel AUX never answers after the panel
++	// power sequencer cycles VDD (display-off wrote PP_CONTROL 0x62; display-on
++	// training then timed out on every transaction). Keep the panel power
++	// target bit set on every PP_CONTROL write issued for the observed
++	// controller, and mirror it into the donor's PP_CONTROL shadow (ctl+0xD80)
++	// so derived writes (LightUpEDP: shadow|4) do not clear it later. The
++	// driver can no longer power the panel down; shutdown removes power anyway.
++	bool keptPanelPower=false;
++	if (!tglPanelKeepDisabled && callbackXE->tglActive && reg==0xC7204 && !(value & 1U)) {
++		auto ctl=static_cast<uint8_t *>(callbackXE->tglObservationController);
++		if (ctl && access && *reinterpret_cast<void **>(ctl+0xC40)==access) {
++			value|=1U;keptPanelPower=true;
++			*reinterpret_cast<uint32_t *>(ctl+0xD80)|=1U;
++			static uint32_t keeps;
++			IORegistryEntry::getRegistryRoot()->setProperty("TGLPanelPowerKeep",__sync_add_and_fetch(&keeps,1),32);
++		}
++	}
++	if (!tglPanelKeepDisabled && callbackXE->tglActive && reg==0xC7204) {
++		auto ctl=static_cast<uint8_t *>(callbackXE->tglObservationController);
++		if (ctl && access && *reinterpret_cast<void **>(ctl+0xC40)==access)
++			*reinterpret_cast<uint32_t *>(ctl+0xD80)|=1U;
++	}
+ 	// Linux icl_aux_power_well_enable/disable uses this PHY override only on
+ 	// ICL. Preserve native TGL AUX request, ACK polling and reference counts.
+ 	if (callbackXE->tglActive && callbackXE->tglComboAUXGateReady &&
+@@ -16737,6 +16952,20 @@
+    IORegistryEntry::getRegistryRoot()->setProperty("TGLBacklightPWM",receipt,sizeof(receipt));
+   }
+  }
++ // Record-only: every native write to BLC_PWM_CTL/FREQ/DUTY and PP_CONTROL on
++ // the observed controller, after it executed, with CTL and PP_CONTROL read back.
++ if(callbackXE->tglActive && TGLBacklightTrace::interesting(reg) && callbackXE->orgTGLRegisterRead) {
++  auto ctl=static_cast<uint8_t *>(callbackXE->tglObservationController);
++  if(ctl && access && *reinterpret_cast<void **>(ctl+0xC40)==access) {
++   const auto read=FunctionCast(wrapTGLRegisterRead,callbackXE->orgTGLRegisterRead);
++   uint64_t uptime{},ns{};clock_get_uptime(&uptime);absolutetime_to_nanoseconds(uptime,&ns);
++   tglBacklightTrace.push(uint32_t(reg),value,tglConnectionCaller(__builtin_return_address(0)),read(access,0xC8250),read(access,0xC7204),ns);
++   uint8_t out[TGLBacklightTrace::bytes];tglBacklightTrace.encode(out);
++   IORegistryEntry::getRegistryRoot()->setProperty("TGLBacklightTrace",out,sizeof(out));
++   tglDisplayOnSample(TGLDisplayOnTrace::BacklightWrite,uint32_t(reg),value,__builtin_return_address(0),nullptr);
++  }
++ }
++ if(keptPanelPower)tglDisplayOnSample(TGLDisplayOnTrace::PanelPowerKeep,uint32_t(reg),value,__builtin_return_address(0),nullptr);
+  if(trace)tglTransitionRecord(36,true,access,reg,tglConnectionCaller(__builtin_return_address(0)),value);
+ 	tglFBIRQEnd(irq,0);
+ 	if (reg < 0x4A000 || reg >= 0x4C000) return;
+@@ -16933,16 +17162,53 @@
+ 		return FunctionCast(wrapTGLReadAUX, callbackXE->orgTGLReadAUX)(port, address, data, length);
+ 	});
+ 	tglDPCDRecord(port, address, data, length, false, true, r, caller);
++	// -wex-sink-rate-select: the sink holds LINK_BW_SET 0 under rate select;
++	// answer the donor's readback with the code it programmed (recorded raw above).
++	if (tglSinkRateSelect && !r && address == 0x100 && length >= 1 && data &&
++		!static_cast<uint8_t *>(data)[0] && tglInternalPanelPort(port,callbackXE->tglActive,callbackXE->tglObservationController)) {
++		if (const auto code = __atomic_load_n(&tglRateSelectCode, __ATOMIC_ACQUIRE)) {
++			static_cast<uint8_t *>(data)[0] = code;
++			static uint32_t readbacks;
++			IORegistryEntry::getRegistryRoot()->setProperty("TGLSinkRateSelectReadback",
++				__sync_add_and_fetch(&readbacks, 1), 32);
++		}
++	}
+ 	return r;
+ }
+ 
+ uint32_t XE::wrapTGLWriteAUX(void *port, uint32_t address, void *data, uint32_t length) {
++	uint8_t rateCopy[2] {};
++	uint8_t rateIndex = TGLSinkStateTrace::noRate, requestedCode = 0;
++	if (tglSinkRateSelect && address == 0x100 && length >= 1 && length <= 2 && data &&
++		static_cast<uint8_t *>(data)[0] && tglInternalPanelPort(port,callbackXE->tglActive,callbackXE->tglObservationController)) {
++		uint8_t table[16] {};
++		if (!FunctionCast(wrapTGLReadAUX, callbackXE->orgTGLReadAUX)(port, 0x010, table, sizeof(table)))
++			rateIndex = TGLSinkStateTrace::rateIndex(table, static_cast<uint8_t *>(data)[0]);
++		if (rateIndex != TGLSinkStateTrace::noRate) {
++			memcpy(rateCopy, data, length);
++			requestedCode = rateCopy[0];
++			rateCopy[0] = 0;
++			data = rateCopy;
++		}
++	}
+ 	auto caller = __builtin_return_address(0);
+ 	tglDPCDRecord(port, address, data, length, true, false, 0, caller);
+ 	const auto r = tglInvokeBootstrapAUX(callbackXE->tglBootstrapAUXReady, 1, port, [&] {
+ 		return FunctionCast(wrapTGLWriteAUX, callbackXE->orgTGLWriteAUX)(port, address, data, length);
+ 	});
+ 	tglDPCDRecord(port, address, data, length, true, true, r, caller);
++	if (rateIndex != TGLSinkStateTrace::noRate) {
++		uint8_t index = rateIndex;
++		const auto rr = r ? r : wrapTGLWriteAUX(port, 0x115, &index, 1);
++		if (!r && !rr) __atomic_store_n(&tglRateSelectCode, requestedCode, __ATOMIC_RELEASE);
++		// Published value: bits 24-31 latest index, bit 16 LINK_RATE_SET write
++		// failed, low 16 bits conversion count.
++		static uint32_t conversions;
++		const auto n = __sync_add_and_fetch(&conversions, 1) & 0xFFFF;
++		IORegistryEntry::getRegistryRoot()->setProperty("TGLSinkRateSelect",
++			(uint32_t(rateIndex) << 24) | (rr ? 1U << 16 : 0) | n, 32);
++		return r ? r : rr;
++	}
+ 	return r;
+ }
+ 
+diff -ruN '--exclude=build' base/WhateverXe/kern_xe.hpp cand11/WhateverXe/kern_xe.hpp
+--- base/WhateverXe/kern_xe.hpp	2026-10-24 16:53:54.000000000 +0900
++++ cand11/WhateverXe/kern_xe.hpp	2026-10-27 22:08:10.000000000 +0900
+@@ -300,6 +300,10 @@
+  static uint32_t wrapTGLPanelTiming(void *controller);
+ 	static uint32_t tglPanelDepthPort(void *port);
+ 	static void wrapTGLModeTiming(void *controller,void *fb,void *timing);
++	mach_vm_address_t orgTGLDisplayTiming {};
++	bool tglDisplayTimingReady {false};
++	uint32_t tglDisplayTimingCounts[4] {}; // Native, Repaired, Inconsistent, Bypassed
++	static void wrapTGLDisplayTiming(void *fb,const void *in,void *out);
+ 	mach_vm_address_t orgTGLGamma10 {}, orgTGLRegisterWrite {}, orgTGLFastRegisterWrite {};
+ 	static void wrapTGLGamma10(void *path, void *transaction, uint32_t control);
+ 	static void wrapTGLRegisterWrite(void *access, unsigned long reg, uint32_t value);
+@@ -351,6 +355,7 @@
+ 	mach_vm_address_t orgTGLGMBus {};
+ 	mach_vm_address_t orgTGLRegisterRead {}, tglGMBusFunction {};
+ 	static uint32_t wrapTGLRegisterRead(void *access, unsigned long reg);
++	static void tglDisplayOnSample(uint32_t kind,uint32_t reg,uint32_t value,void *caller,void *port);
+ 	static uint32_t wrapTGLGMBus(void *controller, uint32_t bus, uint32_t speed, void *request);
+ 	bool tglTopologyReady {false};
+ 	bool tglTrainingLeaseRequested {false}, tglTrainingLeaseReady {false};
+diff -ruN base/tests/fixtures/boot_argument_names.json cand11/tests/fixtures/boot_argument_names.json
+--- base/tests/fixtures/boot_argument_names.json	2026-10-24 16:53:54.000000000 +0900
++++ cand11/tests/fixtures/boot_argument_names.json	2026-10-28 02:41:48.000000000 +0900
+@@ -135,5 +135,11 @@
+     "-wxebeta"
+   ],
+   "-wex-noaccel": [],
+-  "-wex-display-trace": []
++  "-wex-display-trace": [],
++  "-wex-tgl-sdt-guard": [],
++  "-wex-no-panel-keep": [],
++  "-wex-sink-d0": [],
++  "-wex-sink-oui": [],
++  "-wex-sink-rate-select": [],
++  "-wex-sink-rate-restore": []
+ }
+diff -ruN base/tests/tgl_backlight_trace.cpp cand11/tests/tgl_backlight_trace.cpp
+--- base/tests/tgl_backlight_trace.cpp	1970-01-01 09:00:00.000000000 +0900
++++ cand11/tests/tgl_backlight_trace.cpp	2026-10-27 21:50:09.000000000 +0900
+@@ -0,0 +1,29 @@
++// Spec for the record-only backlight register trace.
++#include "kern_tgl_backlight_trace.hpp"
++#include <cassert>
++#include <cstdio>
++#include <cstring>
++using T=TGLBacklightTrace;
++static T::Event at(const uint8_t *out,uint32_t i){T::Event e;memcpy(&e,out+8+size_t(i)*sizeof(T::Event),sizeof(e));return e;}
++int main() {
++ assert(T::interesting(0xC8250) && T::interesting(0xC8254) && T::interesting(0xC8258) && T::interesting(0xC7204));
++ assert(!T::interesting(0xC8260) && !T::interesting(0x70008) && !T::interesting(0));
++ T t;uint8_t out[T::bytes];
++ // Empty: header only, every slot zero.
++ t.encode(out);uint32_t n,cap;memcpy(&n,out,4);memcpy(&cap,out+4,4);
++ assert(n==0 && cap==T::capacity && at(out,0).seq==0 && at(out,T::capacity-1).seq==0);
++ // The donor's display-on order: period, duty, then CTL enable from LightUpEDP.
++ t.push(0xC8254,0x4571,0x507d1,0,0,100);
++ t.push(0xC8258,0x156a,0x4a5c5,0,0,110);
++ t.push(0xC8250,0x80000000,0x507f9,0x80000000,0xC,120);
++ t.encode(out);memcpy(&n,out,4);assert(n==3);
++ auto e=at(out,2);assert(e.seq==3 && e.reg==0xC8250 && e.value==0x80000000 && e.caller==0x507f9 && e.ctl==0x80000000 && e.pp==0xC && e.ns==120);
++ assert(at(out,0).reg==0xC8254 && at(out,1).reg==0xC8258 && at(out,3).seq==0);
++ // Wrap: after more than capacity events the newest are kept, oldest first.
++ for(uint32_t i=0;i<T::capacity+5;i++)t.push(0xC8258,i,0x4a5c5,0,0,1000+i);
++ t.encode(out);memcpy(&n,out,4);assert(n==3+T::capacity+5);
++ assert(at(out,0).seq==n-T::capacity+1 && at(out,T::capacity-1).seq==n && at(out,T::capacity-1).value==T::capacity+4);
++ // Encoding never changes the trace.
++ T copy=t;t.encode(out);assert(!memcmp(&copy,&t,sizeof(t)));
++ puts("PASS: backlight trace ring, order, wrap, encoding");
++}
+diff -ruN base/tests/tgl_bootstrap_aux_fixture.cpp cand11/tests/tgl_bootstrap_aux_fixture.cpp
+--- base/tests/tgl_bootstrap_aux_fixture.cpp	2026-10-24 16:53:54.000000000 +0900
++++ cand11/tests/tgl_bootstrap_aux_fixture.cpp	2026-10-28 02:35:23.000000000 +0900
+@@ -20,8 +20,14 @@
+ #include "adapter.inc"
+ #define FunctionCast(f,p) reinterpret_cast<decltype(&f)>(p)
+ template<class... T> void tglDPCDRecord(T...){}
++// Opt-in eDP rate select stays off here; this fixture checks the bootstrap path.
++#include "kern_tgl_sink_state_trace.hpp"
++struct IORegistryEntry {static IORegistryEntry *getRegistryRoot(){static IORegistryEntry e;return &e;} void setProperty(const char *,unsigned long long,unsigned){}};
++static bool tglSinkRateSelect;static uint8_t tglRateSelectCode;
++static bool tglInternalPanelPort(void *,bool,void *){return true;}
+ struct XE {
+  bool tglBootstrapAUXReady {};uintptr_t orgTGLReadAUX {},orgTGLWriteAUX {},orgTGLI2CAUX {};
++ bool tglActive {};void *tglObservationController {};
+  static uint32_t wrapTGLReadAUX(void*,uint32_t,void*,uint32_t);
+  static uint32_t wrapTGLWriteAUX(void*,uint32_t,void*,uint32_t);
+  static uint32_t wrapTGLI2CAUX(void*,uint32_t,uint32_t*,uint32_t,uint8_t);
+diff -ruN base/tests/tgl_display_on_trace.cpp cand11/tests/tgl_display_on_trace.cpp
+--- base/tests/tgl_display_on_trace.cpp	1970-01-01 09:00:00.000000000 +0900
++++ cand11/tests/tgl_display_on_trace.cpp	2026-10-27 22:25:24.000000000 +0900
+@@ -0,0 +1,34 @@
++// Spec for the record-only display-on readback trace.
++#include "kern_tgl_display_on_trace.hpp"
++#include <cassert>
++#include <cstdio>
++#include <cstring>
++using T=TGLDisplayOnTrace;
++static T::Event at(const uint8_t *out,uint32_t i){T::Event e;memcpy(&e,out+8+size_t(i)*sizeof(T::Event),sizeof(e));return e;}
++int main() {
++ T t;uint8_t out[T::bytes];
++ t.encode(out);uint32_t n,cap;memcpy(&n,out,4);memcpy(&cap,out+4,4);
++ assert(n==0 && cap==T::capacity && at(out,0).seq==0);
++ // A failed AUX transaction with the AUX well off reads back all-ones.
++ T::Event e{};e.kind=T::AUXFailure;e.reg=0x64010;e.value=0xe00002d6;e.caller=0x61ad1;
++ e.auxCtl=0xFFFFFFFF;e.pwrAux=0;e.pwr2=0x8f000000;e.ppStatus=0x80000008;e.ppControl=0x63;e.phyDW12=0xFFFFFFFF;e.ddiBuf=0;e.hpd=0x01000000;e.phyMisc=0x23000000;e.ns=5;
++ t.push(e);
++ T::Event b{};b.kind=T::BacklightWrite;b.reg=0xC8250;b.value=0x80000000;b.caller=0x507f9;b.ns=6;t.push(b);
++ t.encode(out);memcpy(&n,out,4);assert(n==2);
++ auto r=at(out,0);assert(r.seq==1 && r.kind==T::AUXFailure && r.auxCtl==0xFFFFFFFF && r.ppStatus==0x80000008 && r.phyDW12==0xFFFFFFFF && r.hpd==0x01000000 && r.phyMisc==0x23000000 && r.ns==5);
++ assert(at(out,1).seq==2 && at(out,1).kind==T::BacklightWrite && at(out,2).seq==0);
++ // push() assigns the sequence; the caller's seq field is ignored.
++ e.seq=99;t.push(e);t.encode(out);assert(at(out,2).seq==3);
++ // AUX rate limit: first auxBurst admitted, then one in auxEvery, reset per training.
++ T w;uint32_t admitted=0;
++ for(uint32_t i=0;i<T::auxBurst+3*T::auxEvery;i++)admitted+=w.admitAUX();
++ assert(admitted==T::auxBurst+3);
++ w.resetAUXWindow();admitted=0;for(uint32_t i=0;i<T::auxBurst;i++)admitted+=w.admitAUX();assert(admitted==T::auxBurst);
++ // Wrap keeps the newest capacity events, oldest first.
++ for(uint32_t i=0;i<T::capacity+3;i++){e.value=i;e.ns=100+i;t.push(e);}
++ t.encode(out);memcpy(&n,out,4);assert(n==3+T::capacity+3);
++ assert(at(out,0).seq==n-T::capacity+1 && at(out,T::capacity-1).seq==n && at(out,T::capacity-1).value==T::capacity+2);
++ T copy=t;t.encode(out);assert(!memcmp(&copy,&t,sizeof(t)));
++ assert(T::regPwrAux==0x45444 && T::regPPStatus==0xC7200 && T::regPhyDW12==0x162030 && T::regHPD==0xC4000 && T::regPhyMisc==0x64C00);
++ puts("PASS: display-on trace ring, kinds, AUX rate limit, wrap, encoding");
++}
+diff -ruN base/tests/tgl_display_timing_route.py cand11/tests/tgl_display_timing_route.py
+--- base/tests/tgl_display_timing_route.py	1970-01-01 09:00:00.000000000 +0900
++++ cand11/tests/tgl_display_timing_route.py	2026-10-27 20:40:23.000000000 +0900
+@@ -0,0 +1,125 @@
++#!/usr/bin/env python3
++"""Execute the production setupDisplayTiming guard install and wrapper."""
++from pathlib import Path
++import re,sys,subprocess,tempfile
++root=Path(__file__).resolve().parents[1]
++s=(root/'WhateverXe/kern_xe.cpp').read_text()
++a=s.index('if (tglActive && checkKernelArgument("-wex-tgl-sdt-guard")) {')
++install=s[a:s.index('\n\t\t\t}\n',a)+5]
++wrapper=re.search(r'void XE::wrapTGLDisplayTiming\(.*?\n\}',s,re.S).group()
++sites=[(int(o,0),int(n),bytes(int(v,0) for v in b.split(',')))
++       for o,n,b in re.findall(r'\{(0x[0-9A-F]+),(\d+),\{([^}]+)\}\}',install)]
++assert len(sites)==12 and all(n==len(b) for _,n,b in sites)
++if len(sys.argv)>1:
++ donor=Path(sys.argv[1]).read_bytes()
++ for off,n,b in sites:assert donor[off:off+n]==b,hex(off)
++ print('PASS: exact donor setupDisplayTiming install sites')
++image=max(o+n for o,n,_ in sites)+0x10
++code=r'''
++#include "kern_tgl_timing_guard.hpp"
++#include "kern_tgl_wake_index.hpp"
++#include <cassert>
++#include <cstdio>
++#include <cstring>
++#include <map>
++#include <string>
++#include <vector>
++using mach_vm_address_t=uintptr_t;
++namespace XELP {enum class OS {Unknown,Sonoma,Sequoia,Tahoe};OS os=OS::Sequoia;OS kernelOS(const char *){return os;}}
++const char version[]="24.6.0";
++bool bootArg=true;bool checkKernelArgument(const char *n){assert(!strcmp(n,"-wex-tgl-sdt-guard"));return bootArg;}
++std::map<std::string,std::vector<uint8_t>> props;
++struct Root {
++ void setProperty(const char *n,bool v){props[n]={uint8_t(v)};}
++ void setProperty(const char *n,void *p,size_t z){props[n].assign((uint8_t*)p,(uint8_t*)p+z);}
++} root;
++struct IORegistryEntry {static Root *getRegistryRoot(){return &root;}};
++struct KernelPatcher {
++ struct RouteRequest {const char *symbol;void *wrapper;mach_vm_address_t *org;
++  template<class F> RouteRequest(const char *s,F w,mach_vm_address_t &o):symbol(s),wrapper((void*)w),org(&o){}};
++ mach_vm_address_t symbolAt=0;unsigned routes=0;bool routeOK=true;mach_vm_address_t original=0;
++ mach_vm_address_t solveSymbol(size_t,const char *n,mach_vm_address_t,size_t){
++  assert(!strcmp(n,"__ZN21AppleIntelFramebuffer18setupDisplayTimingEPK29IODetailedTimingInformationV2PS0_"));return symbolAt;}
++ bool routeMultiple(size_t,RouteRequest *r,size_t n,mach_vm_address_t,size_t){
++  assert(n==1 && r->symbol);++routes;if(routeOK)*r->org=original;return routeOK;}
++ void clearError(){}
++};
++#define FunctionCast(f,p) reinterpret_cast<decltype(&f)>(p)
++struct Profile {uint32_t identity=0x9A498086,revision=1,effective=0x9A498086;bool overridden()const{return identity!=effective;}};
++struct XE {
++ bool tglActive=true;Profile xeProfile;void *tglObservationController=nullptr;
++ mach_vm_address_t orgTGLDisplayTiming{};bool tglDisplayTimingReady=false;uint32_t tglDisplayTimingCounts[4]{};
++ static void wrapTGLDisplayTiming(void *fb,const void *in,void *out);
++ void install(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size){
++ INSTALL
++ }
++} state,*callbackXE=&state;
++WRAPPER
++uint8_t *nativeOut;bool nativeWrites;unsigned nativeCalls;
++void native(void *,const void *in,void *out){
++ ++nativeCalls;if(nativeWrites){std::memcpy(out,in,0xA0);static_cast<uint8_t*>(out)[0x28]^=1;}
++}
++SITES
++int main(){
++ std::vector<uint8_t> image(IMAGE);
++ auto reset=[&](){for(auto &s:sites)std::memcpy(image.data()+s.off,s.bytes,s.n);props.clear();
++  state=XE{};XELP::os=XELP::OS::Sequoia;bootArg=true;};
++ auto run=[&](KernelPatcher &p){p.original=(mach_vm_address_t)native;
++  if(!p.symbolAt)p.symbolAt=(mach_vm_address_t)image.data()+0x6814C;state.install(p,0,(mach_vm_address_t)image.data(),image.size());};
++ // Qualified: every site, identity, OS and boot argument -> one route, Ready.
++ reset();{KernelPatcher p;run(p);assert(p.routes==1 && state.tglDisplayTimingReady && props["TGLDisplayTimingGuardReady"]==std::vector<uint8_t>{1});}
++ // Not requested: no route and no published state.
++ reset();bootArg=false;{KernelPatcher p;run(p);assert(!p.routes && props.empty());}
++ reset();state.tglActive=false;{KernelPatcher p;run(p);assert(!p.routes && props.empty());}
++ // Any mismatch: no route, Ready false.
++ auto refused=[&](KernelPatcher &p){run(p);assert(!p.routes && !state.tglDisplayTimingReady && props["TGLDisplayTimingGuardReady"]==std::vector<uint8_t>{0});};
++ unsigned flips=0;
++ for(auto &s:sites)for(unsigned i=0;i<s.n;++i){reset();image[s.off+i]^=0x40;KernelPatcher p;refused(p);++flips;}
++ for(auto os:{XELP::OS::Sonoma,XELP::OS::Tahoe,XELP::OS::Unknown}){reset();XELP::os=os;KernelPatcher p;refused(p);}
++ reset();state.xeProfile.revision=0;{KernelPatcher p;refused(p);}
++ reset();state.xeProfile.identity=0x9A408086;state.xeProfile.effective=0x9A408086;{KernelPatcher p;refused(p);}
++ reset();state.xeProfile.effective=0x9A408086;{KernelPatcher p;refused(p);}
++ reset();{KernelPatcher p;p.symbolAt=(mach_vm_address_t)image.data()+0x6814D;refused(p);}
++ reset();{KernelPatcher p;run(p);} // route itself may fail
++ reset();{KernelPatcher p;p.routeOK=false;run(p);assert(p.routes==1 && !state.tglDisplayTimingReady && props["TGLDisplayTimingGuardReady"]==std::vector<uint8_t>{0});}
++ // Wrapper: owner check, bypass, native transparency, repair and record.
++ reset();{KernelPatcher p;run(p);}
++ alignas(8) static uint8_t fb[0x4400];alignas(8) uint8_t ctl[8],in[0xA0],out[0xA0],both[0x140];
++ *reinterpret_cast<void**>(fb+0x1D0)=ctl;const uint32_t id=3;std::memcpy(fb+0x1DC,&id,4);
++ const uint32_t entries=4;std::memcpy(fb+0x209,&entries,4);const int32_t none=-1;std::memcpy(fb+0x3FD8,&none,4);
++ for(unsigned i=0;i<0xA0;++i)in[i]=uint8_t(i);
++ const uint64_t clock=533250000;const uint32_t h=3840,v=2400;
++ std::memcpy(in+0x28,&clock,8);std::memcpy(in+0x40,&h,4);std::memcpy(in+0x50,&v,4);
++ auto call=[&](void *f,const void *i,void *o,bool writes){nativeWrites=writes;nativeCalls=0;XE::wrapTGLDisplayTiming(f,i,o);assert(nativeCalls==1);};
++ std::memset(out,0x33,sizeof(out));call(fb,in,out,false);       // no observed controller yet
++ assert(state.tglDisplayTimingCounts[3]==1 && out[0x28]==0x33 && !props.count("TGLDisplayTimingGuardLast"));
++ state.tglObservationController=ctl;
++ uint8_t other[8];*reinterpret_cast<void**>(fb+0x1D0)=other;call(fb,in,out,false);
++ assert(state.tglDisplayTimingCounts[3]==2 && out[0x28]==0x33);*reinterpret_cast<void**>(fb+0x1D0)=ctl;
++ call(nullptr,in,out,false);call(fb,nullptr,out,false);call(fb,in,nullptr,false);call(fb,both,both+0x50,false);
++ assert(state.tglDisplayTimingCounts[3]==6 && !props.count("TGLDisplayTimingGuardLast") && !props.count("TGLWakeIndexLast"));
++ call(fb,in,out,true);
++ assert(state.tglDisplayTimingCounts[0]==1 && out[0x28]==(in[0x28]^1) && !props.count("TGLDisplayTimingGuardLast"));
++ // Record-only wake snapshot on every guarded call: index -1, flags clear -> path B, native count 1.
++ {auto &w=props["TGLWakeIndexLast"];assert(w.size()==64);uint64_t q[8];std::memcpy(q,w.data(),64);
++  assert(q[0]==uint64_t(-1) && q[1]==uint64_t(-1) && q[2]==0 && q[3]==(4ULL<<32) && q[4]==0 && q[6]==1 && q[7]==0);}
++ // A later success-like state: index 1 with fb+0x1E4 set and a populated entry -> path A reported, entry timing visible.
++ {const int32_t one=1;std::memcpy(fb+0x3FD8,&one,4);fb[0x1E4]=1;auto e=fb+TGLWakeIndex::entryBase+TGLWakeIndex::entryStride;std::memcpy(e+0x28,&clock,8);std::memcpy(e+0x40,&h,4);std::memcpy(e+0x50,&v,4);
++  call(fb,in,out,true);auto &w=props["TGLWakeIndexLast"];uint64_t q[8];std::memcpy(q,w.data(),64);
++  assert(q[0]==1 && q[4]==clock && q[5]==(uint64_t(h)|uint64_t(v)<<32) && q[6]==2 && q[7]==(uint64_t(TGLWakeIndex::A)|uint64_t(TGLWakeIndex::A)<<8));
++  std::memcpy(fb+0x3FD8,&none,4);fb[0x1E4]=0;}
++ std::memset(out,0x33,sizeof(out));call(fb,in,out,false);
++ assert(state.tglDisplayTimingCounts[1]==1 && !std::memcmp(out,in,0xA0));
++ const uint64_t expected[7]={1,3,clock,h,v,1,0};
++ {uint64_t q[8];std::memcpy(q,props["TGLWakeIndexLast"].data(),64);assert(q[6]==2 && q[7]==0);} // native count unchanged by a repair
++ auto &rec=props["TGLDisplayTimingGuardLast"];assert(rec.size()==sizeof(expected) && !std::memcmp(rec.data(),expected,sizeof(expected)));
++ printf("PASS: install gate (%u byte flips, OS, identity, symbol, route failure), production wrapper and wake snapshot\n",flips);
++}
++'''
++table='struct Site {unsigned off,n;uint8_t bytes[38];};\nconst Site sites[]={'+','.join(
++ '{%d,%d,{%s}}'%(o,n,','.join(str(x) for x in b)) for o,n,b in sites)+'};'
++code=code.replace('INSTALL',install).replace('WRAPPER',wrapper).replace('SITES',table).replace('IMAGE',hex(image))
++with tempfile.TemporaryDirectory(prefix='tgl-sdt-route-') as d:
++ d=Path(d);(d/'check.cpp').write_text(code)
++ subprocess.run(['clang++','-std=c++17','-O1','-g','-fsanitize=address,undefined','-I',str(root/'WhateverXe'),str(d/'check.cpp'),'-o',str(d/'check')],check=True)
++ subprocess.run([str(d/'check')],check=True)
+diff -ruN base/tests/tgl_power_fuses.py cand11/tests/tgl_power_fuses.py
+--- base/tests/tgl_power_fuses.py	2026-10-24 16:53:54.000000000 +0900
++++ cand11/tests/tgl_power_fuses.py	2026-10-27 12:46:35.000000000 +0900
+@@ -22,6 +22,7 @@
+         assert function[off:off+14] == seq
+ code = r'''
+ #include "kern_xelp_donor.hpp"
++#include "kern_tgl_power_guard.hpp"
+ #include <cassert>
+ #include <cstdio>
+ #include <cstring>
+@@ -29,6 +30,7 @@
+ static unsigned elapsed,reads,readyAt,failAt;
+ static uint32_t statusMask;
+ static void *expectedAccess;
++static TGLPowerFuseLog tglPowerFuseLog;
+ static void IODelay(unsigned us){assert(us==10);elapsed+=us;}
+ static uint32_t read(void *access,unsigned long reg){
+  assert(access==expectedAccess && reg==0x42000);++reads;
+@@ -53,12 +55,18 @@
+  expectedAccess=function;unsigned cases=0;
+  for(unsigned pg=0;pg<3;++pg)for(unsigned delay=0;delay<=1010;delay+=10)
+  for(unsigned failure:{UINT32_MAX,20U}) {
+-  elapsed=reads=0;readyAt=delay;failAt=failure;statusMask=1U<<(25-pg);
++  elapsed=reads=0;readyAt=delay;failAt=failure;statusMask=1U<<(25-pg);tglPowerFuseLog=TGLPowerFuseLog{};
+   uint32_t initial=0x80000000U|(delay==0?statusMask:0);
+   auto result=run(expectedAccess,0x42000,0x100000+XELPDonor::fuseReadSites[pg]+10,initial);
+   unsigned end=delay<1000?delay:1000;if(failure<end)end=failure;
+   assert(elapsed==end && reads==end/10);
+   assert(result==(end>=failure?UINT32_MAX:0x80000000U|(end>=delay?statusMask:0)));
++  // The record sees exactly the returned value and the poll's own counters.
++  const auto kind=end>=failure?TGLPowerFuseLog::InvalidMMIO:end>=delay?TGLPowerFuseLog::Ready:TGLPowerFuseLog::Timeout;
++  for(unsigned k=0;k<9;++k)assert(tglPowerFuseLog.q[k]==(k==pg*3+kind?1U:0U));
++  assert(tglPowerFuseLog.q[9+pg]==end && tglPowerFuseLog.q[12]==(end?1U:0U));
++  assert(tglPowerFuseLog.q[13]==(pg|uint64_t(kind)<<8|uint64_t(end/10)<<16));
++  assert(tglPowerFuseLog.q[14]==(uint64_t(initial)<<32|result) && tglPowerFuseLog.q[15]==end);
+   ++cases;
+  }
+  for(uintptr_t caller=0x100000;caller<0x100700;++caller){
+diff -ruN base/tests/tgl_power_guard.cpp cand11/tests/tgl_power_guard.cpp
+--- base/tests/tgl_power_guard.cpp	1970-01-01 09:00:00.000000000 +0900
++++ cand11/tests/tgl_power_guard.cpp	2026-10-27 12:44:56.000000000 +0900
+@@ -0,0 +1,24 @@
++#include "kern_tgl_power_guard.hpp"
++#include <cassert>
++#include <cstdio>
++#include <initializer_list>
++int main() {
++ for(unsigned w=0;w<3;++w) {
++  const uint32_t mask=1U<<(25-w);
++  assert(TGLPowerFuseLog::well(mask)==w);
++  assert(TGLPowerFuseLog::classify(mask,mask)==TGLPowerFuseLog::Ready);
++  assert(TGLPowerFuseLog::classify(mask,~mask)==TGLPowerFuseLog::Timeout);
++  // All ones passes the donor's bt test but is a failed MMIO read.
++  assert(TGLPowerFuseLog::classify(mask,UINT32_MAX)==TGLPowerFuseLog::InvalidMMIO);
++ }
++ for(uint32_t mask:{0U,1U<<26,1U<<22,3U<<24,UINT32_MAX})assert(TGLPowerFuseLog::well(mask)==3);
++ TGLPowerFuseLog log;
++ log.record(1U<<26,0,{0,10,1});log.record(0,0,{0,10,1});
++ for(auto v:log.q)assert(!v); // PG1 and unknown masks are not recorded
++ log.record(1U<<25,0,{1U<<25,30,3});log.record(1U<<25,1U<<25,{1U<<25,0,0});
++ log.record(1U<<24,0,{0,1000,100});log.record(1U<<23,0,{UINT32_MAX,20,2});
++ assert(log.q[0]==2 && log.q[4]==1 && log.q[8]==1 && log.q[9]==30 && log.q[10]==1000 && log.q[11]==20);
++ assert(log.q[12]==3 && log.q[13]==(2|2U<<8|2U<<16) && log.q[14]==UINT32_MAX && log.q[15]==20);
++ log.record(1U<<25,0,{1U<<25,10,1});assert(log.q[9]==30); // the peak keeps the maximum
++ puts("PASS: PG2/3/4 fuse result classes, InvalidMMIO, per-well peak and last event");
++}
+diff -ruN base/tests/tgl_sink_state_trace.cpp cand11/tests/tgl_sink_state_trace.cpp
+--- base/tests/tgl_sink_state_trace.cpp	1970-01-01 09:00:00.000000000 +0900
++++ cand11/tests/tgl_sink_state_trace.cpp	2026-10-28 02:42:05.000000000 +0900
+@@ -0,0 +1,61 @@
++// Spec for the record-only eDP sink DPCD snapshot.
++#include "kern_tgl_sink_state_trace.hpp"
++#include <cassert>
++#include <cstdio>
++#include <cstring>
++#include <vector>
++using T=TGLSinkStateTrace;
++static T::Snapshot at(const uint8_t *out,uint32_t i){T::Snapshot s;memcpy(&s,out+8+size_t(i)*sizeof(s),sizeof(s));return s;}
++int main() {
++ // Regions are packed back to back and fit the data buffer.
++ uint32_t next=0;
++ for(uint32_t i=0;i<T::regionCount;i++){assert(T::regions[i].offset==next);next+=T::regions[i].length;}
++ assert(next==T::dataBytes && T::dataBytes<=sizeof(T::Snapshot{}.data));
++ // The addresses this experiment depends on are covered.
++ auto covers=[](uint32_t a){for(auto &r:T::regions)if(a>=r.address&&a<r.address+r.length)return true;return false;};
++ assert(covers(0x001) && covers(0x108) && covers(0x10A) && covers(0x115) && covers(0x300) && covers(0x600) && covers(0x700) && covers(0x2201));
++ // A healthy sink: every region read in order, data lands at its offset.
++ std::vector<uint32_t> seen;
++ T::Snapshot s{};
++ T::capture(s,[&](uint32_t a,uint8_t *b,uint32_t n){seen.push_back(a);memset(b,int(a&0xFF)|1,n);return 0U;});
++ assert(seen.size()==T::regionCount && seen[0]==0x0000 && seen[2]==0x0110 && seen[8]==0x2200);
++ assert(s.data[T::regions[2].offset+5]==(0x10|1) && s.result[8]==0);
++ // A sink that stops answering: the failing region is zeroed, the rest skipped.
++ seen.clear();T::Snapshot f{};
++ T::capture(f,[&](uint32_t a,uint8_t *b,uint32_t n){seen.push_back(a);memset(b,0xAA,n);return a==0x0100?0xe00002d6U:0U;});
++ assert(seen.size()==2 && f.result[0]==0 && f.result[1]==0xe00002d6U && f.result[2]==0xFFFFFFFFU && f.result[8]==0xFFFFFFFFU);
++ assert(f.data[T::regions[1].offset]==0 && f.data[T::regions[0].offset]==0xAA);
++ // First slots keep the boot snapshots; last slots wrap, oldest first.
++ T t;uint8_t out[T::bytes];
++ t.encode(out);uint32_t n,shape;memcpy(&n,out,4);memcpy(&shape,out+4,4);
++ assert(n==0 && shape==((T::firstSlots<<16)|T::lastSlots) && at(out,0).seq==0);
++ for(uint32_t i=0;i<T::firstSlots+T::lastSlots+3;i++){T::Snapshot x{};x.flags=i;x.ns=100+i;t.push(x);}
++ t.encode(out);memcpy(&n,out,4);assert(n==T::firstSlots+T::lastSlots+3);
++ for(uint32_t i=0;i<T::firstSlots;i++)assert(at(out,i).seq==i+1 && at(out,i).flags==i);
++ assert(at(out,T::firstSlots).seq==n-T::lastSlots+1 && at(out,T::firstSlots+T::lastSlots-1).seq==n);
++ // Encoding never changes the trace.
++ T copy=t;t.encode(out);assert(!memcmp(&copy,&t,sizeof(t)));
++ // Restore: no write when the sink already matches; written once on success;
++ // bounded retries with a wait after each failure; a failed read writes nothing.
++ uint8_t sink[3]{0,0,0};uint32_t writes=0,waits=0;bool fail=false;
++ auto rd=[&](uint32_t,uint8_t *b,uint32_t n){memcpy(b,sink,n);return 0U;};
++ auto wr=[&](uint32_t a,uint8_t *b,uint32_t n){++writes;assert(a==0x300||a==0x600||a==0x115);if(fail)return 0xe00002bcU;memcpy(sink,b,n);return 0U;};
++ auto wt=[&]{++waits;};
++ assert(T::restore(0x300,T::sourceOUI,3,3,rd,wr,wt)==1 && writes==1 && waits==0 && sink[1]==0xAA && sink[2]==0x01);
++ assert(T::restore(0x300,T::sourceOUI,3,3,rd,wr,wt)==0 && writes==1);
++ memset(sink,0,3);fail=true;writes=0;
++ assert(T::restore(0x600,T::setPowerD0,1,3,rd,wr,wt)==2 && writes==3 && waits==3 && sink[0]==0);
++ writes=0;assert(T::restore(0x600,T::setPowerD0,1,3,[](uint32_t,uint8_t *,uint32_t){return 0xe00002d6U;},wr,wt)==3 && writes==0);
++ assert(T::restore(0x600,T::setPowerD0,5,3,rd,wr,wt)==3);
++ // Firmware LINK_RATE_SET (5.4 Gbps index) written back after a power cycle reset it.
++ memset(sink,0,3);fail=false;writes=0;const uint8_t rate[1]{6};
++ assert(T::restore(0x115,rate,1,3,rd,wr,wt)==1 && sink[0]==6 && writes==1);
++ assert(T::restore(0x115,rate,1,3,rd,wr,wt)==0 && writes==1);
++ // Rate select against this panel's table (1.62 2.16 2.43 2.7 3.24 4.32 5.4 8.1 Gbps).
++ const uint8_t table[16]{0xa4,0x1f,0x30,0x2a,0x76,0x2f,0xbc,0x34,0x48,0x3f,0x60,0x54,0x78,0x69,0x34,0x9e};
++ assert(T::rateIndex(table,0x06)==0 && T::rateIndex(table,0x0a)==3 && T::rateIndex(table,0x14)==6 && T::rateIndex(table,0x1e)==7);
++ assert(T::rateIndex(table,0x00)==T::noRate && T::rateIndex(table,0x0c)==4 && T::rateIndex(table,0x0b)==T::noRate);
++ const uint8_t shortTable[16]{0x78,0x69,0,0,0x34,0x9e};
++ assert(T::rateIndex(shortTable,0x14)==0 && T::rateIndex(shortTable,0x1e)==T::noRate);
++ puts("PASS: sink state snapshot regions, capture, skip-after-failure, ring, encoding, restore, rate select");
++}
+diff -ruN base/tests/tgl_timing_guard.cpp cand11/tests/tgl_timing_guard.cpp
+--- base/tests/tgl_timing_guard.cpp	1970-01-01 09:00:00.000000000 +0900
++++ cand11/tests/tgl_timing_guard.cpp	2026-10-27 12:20:05.000000000 +0900
+@@ -0,0 +1,69 @@
++// Specification of the TGL setupDisplayTiming output guard (pure helper).
++// The donor's setupDisplayTiming returns void and leaves its output untouched
++// when the AGDC timing request fails or returns an out-of-range index; its
++// caller still programs that output. The guard marks three probe fields
++// before the native call and, if none was written, substitutes the caller's
++// validated input, which is what the donor's own pass-through branch writes.
++#include "kern_tgl_timing_guard.hpp"
++#include <cassert>
++#include <cstdio>
++#include <cstring>
++#include <initializer_list>
++using G=TGLTimingGuard;
++static const size_t probes[][2]={{0x28,8},{0x40,4},{0x50,4}};
++static void fill(uint8_t *t,uint8_t seed) {for(size_t i=0;i<G::size;++i)t[i]=uint8_t(seed+i*7);}
++static void timing(uint8_t *t,uint64_t clock,uint32_t h,uint32_t v) {
++ fill(t,0x31);std::memcpy(t+0x28,&clock,8);std::memcpy(t+0x40,&h,4);std::memcpy(t+0x50,&v,4);
++}
++int main() {
++ static_assert(G::size==0xA0,"IODetailedTimingInformationV2 size");
++ alignas(8) uint8_t in[G::size],out[G::size],before[G::size],expect[G::size];
++ timing(in,533250000,3840,2400);
++ // arm touches only the probe fields and makes them implausible as a timing.
++ fill(out,0x77);std::memcpy(before,out,G::size);G::arm(out);
++ for(size_t i=0,p=0;i<G::size;++i) {
++  const bool probe=(i>=0x28&&i<0x30)||(i>=0x40&&i<0x44)||(i>=0x50&&i<0x54);
++  if(!probe)assert(out[i]==before[i]);else ++p;
++  if(i==G::size-1)assert(p==16);
++ }
++ uint64_t clock;uint32_t h,v;std::memcpy(&clock,out+0x28,8);std::memcpy(&h,out+0x40,4);std::memcpy(&v,out+0x50,4);
++ assert(clock>100000000000ULL && h>0xFFFF && v>0xFFFF);
++ // Native wrote the whole result (memmove or field copy): transparent.
++ fill(out,0x77);G::arm(out);timing(expect,148500000,1920,1080);std::memcpy(out+0x0C,expect+0x0C,0x8A);
++ std::memcpy(before,out,G::size);
++ assert(G::settle(out,in)==G::Native && !std::memcmp(out,before,G::size));
++ // A native result equal to the input is still native, not a repair.
++ fill(out,0x77);G::arm(out);std::memcpy(out,in,G::size);
++ assert(G::settle(out,in)==G::Native && !std::memcmp(out,in,G::size));
++ // Native wrote nothing: the output becomes exactly the current input,
++ // independent of any earlier result (no snapshot reuse).
++ for(uint8_t seed:{0x00,0x77,0xFF}) {
++  fill(out,seed);G::arm(out);
++  assert(G::settle(out,in)==G::Repaired && !std::memcmp(out,in,G::size));
++ }
++ alignas(8) uint8_t in2[G::size];timing(in2,241500000,2560,1600);
++ std::memcpy(out,in,G::size);G::arm(out);
++ assert(G::settle(out,in2)==G::Repaired && !std::memcmp(out,in2,G::size));
++ // Partial overwrite cannot come from the donor (every success path writes
++ // all three probes). It is reported and still replaced by the input.
++ for(unsigned mask=1;mask<7;++mask) {
++  fill(out,0x55);G::arm(out);
++  for(unsigned i=0;i<3;++i)if(mask&(1U<<i))std::memcpy(out+probes[i][0],in2+probes[i][0],probes[i][1]);
++  assert(G::settle(out,in)==G::Inconsistent && !std::memcmp(out,in,G::size));
++ }
++ // A probe overwritten with only part of its width counts as written.
++ for(auto &p:probes)for(size_t b=0;b<p[1];++b) {
++  fill(out,0x55);G::arm(out);out[p[0]+b]^=0x01;
++  assert(G::settle(out,in)==G::Inconsistent && !std::memcmp(out,in,G::size));
++ }
++ // Arming would destroy an overlapping input, and a NULL pointer leaves no
++ // repair source: the wrapper then calls the donor without the guard.
++ alignas(8) uint8_t both[2*G::size];
++ assert(G::applicable(in,out) && G::applicable(out,in));
++ assert(G::applicable(both,both+G::size) && G::applicable(both+G::size,both));
++ for(size_t d:{size_t(0),size_t(1),size_t(0x50),G::size-1}) {
++  assert(!G::applicable(both,both+d) && !G::applicable(both+d,both));
++ }
++ assert(!G::applicable(nullptr,out) && !G::applicable(in,nullptr) && !G::applicable(nullptr,nullptr));
++ puts("PASS: probe arming, native transparency, current-input repair, partial overwrite and applicability");
++}
+diff -ruN base/tests/tgl_timing_guard_native.py cand11/tests/tgl_timing_guard_native.py
+--- base/tests/tgl_timing_guard_native.py	1970-01-01 09:00:00.000000000 +0900
++++ cand11/tests/tgl_timing_guard_native.py	2026-10-27 12:21:14.000000000 +0900
+@@ -0,0 +1,14 @@
++#!/usr/bin/env python3
++"""Replay the exact Sequoia TGL setupDisplayTiming with the timing output guard."""
++from pathlib import Path
++import argparse,hashlib,subprocess,tempfile
++p=argparse.ArgumentParser(description=__doc__);p.add_argument('donor',type=Path)
++p.add_argument('--native-only',action='store_true',help='prove the donor behaviour without the guard')
++a=p.parse_args()
++# Graphics 0.2.0 Sequoia AppleIntelTGLGraphicsFramebuffer, UUID B6078743-...-0949.
++if hashlib.sha256(a.donor.read_bytes()).hexdigest()!='909847cd017dfb2f693cc2c78c5dc20fed4a0a24fb4e94c22e12605b53849cea':p.error('unqualified donor SHA256')
++r=Path(__file__).resolve().parents[1]
++with tempfile.TemporaryDirectory(prefix='tgl-timing-') as d:
++ d=Path(d);flags=['-DNATIVE_ONLY'] if a.native_only else []
++ subprocess.run(['clang++','-arch','x86_64','-std=c++14','-O1','-g',*flags,'-I',str(r/'WhateverXe'),str(r/'tests/tgl_timing_guard_native_fixture.cpp'),'-o',str(d/'check')],check=True)
++ subprocess.run([str(d/'check'),str(a.donor.resolve())],check=True)
+diff -ruN base/tests/tgl_timing_guard_native_fixture.cpp cand11/tests/tgl_timing_guard_native_fixture.cpp
+--- base/tests/tgl_timing_guard_native_fixture.cpp	1970-01-01 09:00:00.000000000 +0900
++++ cand11/tests/tgl_timing_guard_native_fixture.cpp	2026-10-27 12:21:22.000000000 +0900
+@@ -0,0 +1,120 @@
++// Executes the exact donor AppleIntelFramebuffer::setupDisplayTiming with a
++// mocked AGDC callback, first alone and then wrapped by TGLTimingGuard.
++// The native run is the oracle: success must leave every byte identical
++// with and without the guard; failure must leave the output untouched by the
++// donor and equal to the validated input with the guard, with no other change.
++#ifndef NATIVE_ONLY
++#include "kern_tgl_timing_guard.hpp"
++#endif
++#include <cassert>
++#include <cstdarg>
++#include <cstdint>
++#include <cstdio>
++#include <cstring>
++#include <fstream>
++#include <initializer_list>
++#include <vector>
++#include <sys/mman.h>
++constexpr size_t TimingSize=0xA0,Entry=0x3DC;
++alignas(16) uint8_t fb[0x5000],controller[0x2000],in[TimingSize],out[TimingSize],request[0xB0];
++uint8_t token;
++unsigned bzeros,moves,logs,disables,dbufs,resources,agdcs;
++bool agdcResult;int32_t agdcIndex;
++void bzeroMock(void *p,size_t n){assert(n==0xB0);++bzeros;std::memset(p,0,n);}
++void *memmoveMock(void *d,const void *s,size_t n){assert(d==out && s==in && n==TimingSize);++moves;return std::memmove(d,s,n);}
++void logMock(const char *,...){++logs;}
++void disableMock(void *p,bool b){assert(p==fb && !b);++disables;}
++void dbufMock(void *p){assert(p==controller);++dbufs;}
++void resourcesMock(void *p){assert(p==fb);++resources;}
++bool agdcMock(void *ctx,uint8_t *req,uint32_t zero,uint32_t op) {
++ assert(ctx==&token && zero==0 && op==0xC);++agdcs;
++ std::memcpy(request,req,sizeof(request));std::memcpy(req+0xAC,&agdcIndex,4);
++ return agdcResult;
++}
++void jump(uint8_t *p,uintptr_t t){p[0]=0x48;p[1]=0xb8;std::memcpy(p+2,&t,8);p[10]=0xff;p[11]=0xe0;}
++void callTo(uint8_t *m,unsigned site,unsigned expected,unsigned target) {
++ int32_t rel;assert(m[site]==0xe8);std::memcpy(&rel,m+site+1,4);
++ assert(site+5+rel==expected); // relocated externals encode the next instruction
++ rel=target-site-5;std::memcpy(m+site+1,&rel,4);
++}
++template<class T> void put(size_t o,T v){std::memcpy(fb+o,&v,sizeof(v));}
++template<class T> T get(const uint8_t *p,size_t o){T v;std::memcpy(&v,p+o,sizeof(v));return v;}
++enum Path {PassThrough,Fields,Flag2};
++struct Case {bool result;int32_t index;Path path;bool flag1e9,wide,flag1ea;int32_t previous;};
++void prepare(const Case &c,uint8_t garbage) {
++ bzeros=moves=logs=disables=dbufs=resources=agdcs=0;agdcResult=c.result;agdcIndex=c.index;
++ for(size_t i=0;i<sizeof(fb);++i)fb[i]=uint8_t(i*13+5);
++ put<void*>(0x1D0,controller);put<uint32_t>(0x1DC,0x1234);put<int32_t>(0x4250,-3);put<uint32_t>(0x209,2);
++ for(size_t e=0;e<2;++e) {
++  put<uint8_t>(0x21D+e*Entry,c.path==Flag2?2:0);put<uint32_t>(0x28D+e*Entry,c.path==PassThrough?0:1);
++ }
++ put<uint8_t>(0x1E9,c.flag1e9);put<uint8_t>(0x1EA,c.flag1ea);put<int32_t>(0x3FD8,c.previous);
++ *reinterpret_cast<bool(**)(void*,uint8_t*,uint32_t,uint32_t)>(controller+0x1BF8)=agdcMock;
++ *reinterpret_cast<void**>(controller+0x1C00)=&token;
++ for(size_t i=0;i<TimingSize;++i)in[i]=uint8_t(0x40+i);
++ const uint64_t clock=c.wide?533250000:148500000;const uint32_t h=c.wide?3840:1920,v=c.wide?2400:1080;
++ std::memcpy(in+0x28,&clock,8);std::memcpy(in+0x40,&h,4);std::memcpy(in+0x50,&v,4);
++ std::memset(out,garbage,sizeof(out));
++}
++struct Snapshot {
++ std::vector<uint8_t> frame,output;unsigned counts[7];
++ static Snapshot take(){return {{fb,fb+sizeof(::fb)},{out,out+TimingSize},{bzeros,moves,logs,disables,dbufs,resources,agdcs}};}
++ bool operator==(const Snapshot &o)const{return frame==o.frame && output==o.output && !std::memcmp(counts,o.counts,sizeof(counts));}
++};
++int main(int argc,char **argv) {
++ assert(argc==2);std::ifstream f(argv[1],std::ios::binary);std::vector<char> b((std::istreambuf_iterator<char>(f)),{});
++ const size_t size=4*1024*1024;assert(b.size()==0x2CEA70);
++ auto m=static_cast<uint8_t*>(mmap(nullptr,size,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANON,-1,0));
++ assert(m!=MAP_FAILED);std::memcpy(m,b.data(),b.size());
++ const uintptr_t mocks[]={(uintptr_t)bzeroMock,(uintptr_t)logMock,(uintptr_t)memmoveMock,(uintptr_t)disableMock,(uintptr_t)dbufMock,(uintptr_t)resourcesMock};
++ for(unsigned i=0;i<6;++i)jump(m+0x300000+0x20*i,mocks[i]);
++ callTo(m,0x6817D,0x68182,0x300000);callTo(m,0x68524,0x68529,0x300020);callTo(m,0x6854C,0x68551,0x300020);
++ callTo(m,0x68804,0x68809,0x300040);callTo(m,0x688A3,0x68900,0x300060);callTo(m,0x688AF,0x54754,0x300080);
++ callTo(m,0x688EA,0x670BA,0x3000A0);
++ const auto native=reinterpret_cast<void(*)(void*,const void*,void*)>(m+0x6814C);
++ unsigned successes=0,failures=0;
++ for(bool result:{false,true})for(int32_t index:{0,1,2,-1,7})for(Path path:{PassThrough,Fields,Flag2})
++ for(bool f1e9:{false,true})for(bool wide:{false,true})for(bool f1ea:{false,true})for(int32_t previous:{-1,0,1}) {
++  const Case c{result,index,path,f1e9,wide,f1ea,previous};
++  const bool success=result && uint32_t(index)<2;
++  for(uint8_t garbage:{0x00,0xA5}) {
++   prepare(c,garbage);const auto initial=Snapshot::take();
++   native(fb,in,out);const auto plain=Snapshot::take();
++   assert(agdcs==1 && bzeros==1);
++   assert(get<uint32_t>(request,0)==0x1234 && get<int64_t>(request,4)==-3);
++   assert(!std::memcmp(request+0x10,in+0x0C,0x7C) && get<uint64_t>(request,0x2C)==get<uint64_t>(in,0x28));
++   if(!success) {
++    // Native counterexample: the output stays as the caller left it, and
++    // nothing else moves, yet setDisplayMode still programs this output.
++    assert(plain.frame==initial.frame && plain.output==initial.output);
++    assert(logs==1 && !moves && !resources && !disables && !dbufs);
++   } else {
++    assert(!logs && resources==1 && get<int32_t>(fb,0x3FD8)==index);
++    for(size_t o:{size_t(0x28),size_t(0x40),size_t(0x50)}) {
++     bool written=false;for(size_t i=0;i<4;++i)written|=out[o+i]!=garbage;assert(written);
++    }
++    assert(moves==(path==PassThrough?1u:0u));
++    if(path==PassThrough)assert(!std::memcmp(out,in,TimingSize));
++   }
++#ifndef NATIVE_ONLY
++   prepare(c,garbage);
++   assert(TGLTimingGuard::applicable(in,out));
++   TGLTimingGuard::arm(out);native(fb,in,out);
++   const auto outcome=TGLTimingGuard::settle(out,in);const auto guarded=Snapshot::take();
++   if(success) {
++    assert(outcome==TGLTimingGuard::Native && guarded==plain);
++   } else {
++    assert(outcome==TGLTimingGuard::Repaired && !std::memcmp(out,in,TimingSize));
++    assert(guarded.frame==plain.frame && !std::memcmp(guarded.counts,plain.counts,sizeof(plain.counts)));
++   }
++#endif
++  }
++  success ? ++successes : ++failures;
++ }
++ assert(successes==2*3*2*2*2*3 && failures==8*3*2*2*2*3);
++#ifdef NATIVE_ONLY
++ printf("PASS native-only: %u success and %u failure cases; failure leaves output and framebuffer untouched\n",successes,failures);
++#else
++ printf("PASS: %u success cases transparent, %u failure cases repaired from the current input only\n",successes,failures);
++#endif
++}
+diff -ruN base/tests/tgl_wake_index.cpp cand11/tests/tgl_wake_index.cpp
+--- base/tests/tgl_wake_index.cpp	1970-01-01 09:00:00.000000000 +0900
++++ cand11/tests/tgl_wake_index.cpp	2026-10-27 20:40:07.000000000 +0900
+@@ -0,0 +1,52 @@
++// Spec for the record-only wake index snapshot (B5 diagnostic).
++#include "kern_tgl_wake_index.hpp"
++#include <cassert>
++#include <cstdio>
++#include <cstring>
++#include <vector>
++using W=TGLWakeIndex;
++static std::vector<uint8_t> frame(uint32_t entries) {
++ std::vector<uint8_t> fb(W::entryBase+size_t(entries)*W::entryStride+0xA0);
++ if(fb.size()<0x4260)fb.resize(0x4260);
++ memcpy(fb.data()+0x209,&entries,4);
++ return fb;
++}
++static void setIndex(std::vector<uint8_t> &fb,int32_t idx){memcpy(fb.data()+0x3FD8,&idx,4);}
++static void setEntry(std::vector<uint8_t> &fb,uint32_t idx,uint64_t clock,uint32_t h,uint32_t v) {
++ auto e=fb.data()+W::entryBase+size_t(idx)*W::entryStride;
++ memcpy(e+0x28,&clock,8);memcpy(e+0x40,&h,4);memcpy(e+0x50,&v,4);
++}
++int main() {
++ // Fresh object: index -1, every flag clear -> path B, no entry read.
++ auto fb=frame(3);setIndex(fb,-1);
++ auto s=W::take(fb.data());
++ assert(s.index==-1 && s.entries==3 && !s.flag1E4 && !s.flag1E6 && !s.entryClock && W::predict(s)==W::B);
++ // Index -1 with fb+0x1E6 set: the donor would rebuild from before the object (A1).
++ fb[0x1E6]=1;s=W::take(fb.data());assert(W::predict(s)==W::A1 && !s.entryClock);
++ fb[0x1E6]=0;
++ // allocateBootDisplayResources wrote 0 but setupDisplayTiming never succeeded: fb+0x1E4 clear -> B.
++ setIndex(fb,0);setEntry(fb,0,0,0,0);s=W::take(fb.data());assert(s.index==0 && W::predict(s)==W::B);
++ // One success: index 2, flag set, entry carries the timing -> A, entry timing visible.
++ setIndex(fb,2);fb[0x1E4]=1;fb[0x1EA]=1;setEntry(fb,2,592500000,3840,2400);
++ const uint32_t mode=0x80001000;memcpy(fb.data()+0x4250,&mode,4);
++ s=W::take(fb.data());
++ assert(W::predict(s)==W::A && s.entryClock==592500000 && s.entryH==3840 && s.entryV==2400 && s.mode==mode && s.flag1EA==1);
++ // Index at or beyond the entry count is never dereferenced.
++ setIndex(fb,3);s=W::take(fb.data());assert(W::predict(s)==W::Unknown && !s.entryClock && !s.entryH);
++ setIndex(fb,-7);s=W::take(fb.data());assert(W::predict(s)==W::A1 && !s.entryClock); // flag set, negative index
++ fb[0x1E4]=0;s=W::take(fb.data());assert(W::predict(s)==W::B);fb[0x1E4]=1;
++ // Zero entries: index 0 is out of range.
++ auto empty=frame(0);setIndex(empty,0);empty[0x1E4]=1;s=W::take(empty.data());
++ assert(W::predict(s)==W::Unknown && !s.entryClock);
++ // Encoding: before/after, packed flags, mode|entries, entry timing, native count, paths.
++ setIndex(fb,2);auto before=W::take(fb.data());
++ fb[0x1E6]=1;setIndex(fb,-1);auto after=W::take(fb.data());
++ uint64_t r[8];W::encode(r,before,after,41);
++ assert(r[0]==2 && r[1]==uint64_t(-1) && r[2]==(1ULL|1ULL<<16|1ULL<<24|1ULL<<32|1ULL<<40));
++ assert(r[3]==(uint64_t(mode)|3ULL<<32) && r[4]==0 && r[5]==0 && r[6]==41 && r[7]==(uint64_t(W::A1)|uint64_t(W::A)<<8));
++ W::encode(r,after,before,0);
++ assert(r[4]==592500000 && r[5]==(3840ULL|2400ULL<<32) && r[7]==(uint64_t(W::A)|uint64_t(W::A1)<<8));
++ // take() never writes.
++ auto copy=fb;W::take(fb.data());assert(copy==fb);
++ puts("PASS: wake index snapshot, path prediction, bounded entry read, encoding");
++}
+diff -ruN base/tools/test.py cand11/tools/test.py
+--- base/tools/test.py	2026-10-24 16:53:54.000000000 +0900
++++ cand11/tools/test.py	2026-10-27 21:38:33.000000000 +0900
+@@ -3,13 +3,14 @@
+ import argparse,concurrent.futures,json,subprocess,sys
+ from pathlib import Path
+ R=Path(__file__).resolve().parents[1]
+-p=argparse.ArgumentParser(description=__doc__);p.add_argument('--donor',type=Path);p.add_argument('--accelerator',type=Path);a=p.parse_args()
++p=argparse.ArgumentParser(description=__doc__);p.add_argument('--donor',type=Path);p.add_argument('--accelerator',type=Path);p.add_argument('--tgl-donor',type=Path,help='Sequoia Graphics 0.2.0 TGL framebuffer for local guard replay');a=p.parse_args()
+ O=R/'build/tests';O.mkdir(parents=True,exist_ok=True)
+ python_tests=['small_gt_urb','display_backend_dispatch','tgl_agdc_port_status','display_contract_adapter','tgl_agdc_aux_observer','xe_data_access','adls_aux_parent','adls_lane_power','adls_clock_guard','xelp_mmio_bar','bigsur_pmap','tahoe_iosurface','tahoe_pmap','sequoia_pmap','sonoma_iosurface','sonoma_pmap','ventura_pmap','tgl_kernel_admission','monterey_pmap','xelp_forcewake_irq','boot_arguments','tgl_display_observers','tgl_stream_ack','tgl_transmitter_observer','tgl_transition_live','tgl_aux_live','tgl_bootstrap_host','tgl_clock_order','provider_binding','tgl_start_order','tgl_hdmi_wiring','tgl_bootstrap_aux','tgl_copy_routing','tgl_training_leases','tgl_wiring','tgl_boot_readout','tgl_pcode_gate','tgl_port_use','tgl_tc_cold','tgl_fia','tgl_port_map','tgl_dp_alt_fia','tgl_dp_mode_replace','tgl_phy_clock_gating','tgl_probe','dvmt','host_publication']
+ jobs=[(p.stem,['clang++','-std=c++17','-O1','-g','-fsanitize=address,undefined','-fno-omit-frame-pointer','-I'+str(R/'WhateverXe'),str(p),'-o',str(O/p.stem)],[str(O/p.stem)]) for p in sorted((R/'tests').glob('*.cpp')) if not p.stem.endswith('_fixture')]
+-python_tests += ['tgl_power_fuses', 'display13_boot_aux', 'display13_aux', 'display13_sst', 'display13_combo_clock', 'adls_panel_pwm', 'tgl_panel_timing', 'backlight_adapter', 'tgl_panel_power', 'tgl_edp_transcoder', 'tgl_training_pattern', 'tgl_combo_pll_write', 'tgl_sink_framing', 'tgl_combo_aux_gate', 'tgl_combo_signal_guard', 'tgl_combo_aux_lifetime', 'tgl_iosurface_compression', 'tgl_panel_depth_route', 'display13_tiling']
++python_tests += ['tgl_power_fuses', 'display13_boot_aux', 'display13_aux', 'display13_sst', 'display13_combo_clock', 'adls_panel_pwm', 'tgl_panel_timing', 'backlight_adapter', 'tgl_panel_power', 'tgl_edp_transcoder', 'tgl_training_pattern', 'tgl_combo_pll_write', 'tgl_sink_framing', 'tgl_combo_aux_gate', 'tgl_combo_signal_guard', 'tgl_combo_aux_lifetime', 'tgl_iosurface_compression', 'tgl_panel_depth_route', 'display13_tiling', 'tgl_display_timing_route']
+ jobs += [(n,[sys.executable,str(R/'tests'/(n+'.py'))],None) for n in python_tests]
+ if a.donor:jobs += [(n,[sys.executable,str(R/'tests'/(n+'.py')),str(a.donor.resolve())],None) for n in ['tgl_power_fuses', 'display13_aux', 'display13_sst', 'display13_combo_clock', 'adls_panel_pwm', 'tgl_panel_timing','tgl_agdc_port_status','tgl_tc_native','tgl_tc_mode','tgl_mode_native','tgl_panel_depth_route','adls_donor','adls_clock_native']]
++if a.tgl_donor:jobs += [(n+'_donor',[sys.executable,str(R/'tests'/(n+'.py')),str(a.tgl_donor.resolve())],None) for n in ['tgl_timing_guard_native','tgl_display_timing_route']]
+ if a.accelerator:jobs += [('xelp_forcewake_irq_native',[sys.executable,str(R/'tests/xelp_forcewake_irq.py'),'--donor',str(a.accelerator.resolve())],None),('tgl_rpcs_native',[sys.executable,str(R/'tests/tgl_rpcs_native.py'),str(a.accelerator.resolve())],None)] + [(n,[sys.executable,str(R/'tests'/(n+'.py')),str(a.accelerator.resolve())],None) for n in ['small_gt_urb','tgl_tlb_preparser','tgl_semaphore_tlb','tgl_iosurface_compression']]
+ def check(job):
+  n,compile,execute=job

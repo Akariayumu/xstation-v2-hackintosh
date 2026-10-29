@@ -1,0 +1,60 @@
+# 第三方发布包：名称	SHA-256	URL
+archive	OpenCore-1.0.8-DEBUG.zip	3f5f42b85703cf2c08e8dcd9245a52fb4326c9f4ef335c75b49f516cbbe131c6	https://github.com/acidanthera/OpenCorePkg/releases/download/1.0.8/OpenCore-1.0.8-DEBUG.zip
+archive	Lilu-1.7.2-RELEASE.zip	53967d7dcfaab01023a33df2e969a89522f13d6654a6a56ac4711b62dabf3ab8	https://github.com/acidanthera/Lilu/releases/download/1.7.2/Lilu-1.7.2-RELEASE.zip
+archive	VirtualSMC-1.3.8-RELEASE.zip	2e29a8aaf91b4eb0bcdf5913ed17e70f5cf76531122acd4132eff7813a54de8b	https://github.com/acidanthera/VirtualSMC/releases/download/1.3.8/VirtualSMC-1.3.8-RELEASE.zip
+archive	AppleALC-1.9.8-RELEASE.zip	d4d36cd2da7863cf7cbfcb0892d45c08457f4f4ddd065a073dd010e46bd63bcb	https://github.com/acidanthera/AppleALC/releases/download/1.9.8/AppleALC-1.9.8-RELEASE.zip
+archive	NVMeFix-1.1.3-RELEASE.zip	e1d5657ab7ac31f69771708f7b80bf218ab9aa0b8e4c4fe6ff943983037e3dfb	https://github.com/acidanthera/NVMeFix/releases/download/1.1.3/NVMeFix-1.1.3-RELEASE.zip
+archive	BrcmPatchRAM-2.7.2-RELEASE.zip	e1c1c55347526d031a8ae2fdd1f52efa3019161e497fb38e1cfa809752f8af21	https://github.com/acidanthera/BrcmPatchRAM/releases/download/2.7.2/BrcmPatchRAM-2.7.2-RELEASE.zip
+archive	VoodooPS2Controller-2.3.7-RELEASE.zip	d5483298736ba4b3b82c7203d9a46968c668fb7af732b8b22c2096deb0acf83f	https://github.com/acidanthera/VoodooPS2/releases/download/2.3.7/VoodooPS2Controller-2.3.7-RELEASE.zip
+archive	VoodooI2C-2.9.1-RELEASE.zip	368e5eb60794583c340764813bd7e8244e94d3d3c06ea5b67034addd539487f4	https://github.com/VoodooI2C/VoodooI2C/releases/download/v2.9.1/VoodooI2C-2.9.1-RELEASE.zip
+archive	ECEnabler-1.0.6-RELEASE.zip	e21149519856308c6c4c06e0917aef9e3423ff3e23b6ea77989099f4f2cf0f0a	https://github.com/1Revenger1/ECEnabler/releases/download/1.0.6/ECEnabler-1.0.6-RELEASE.zip
+archive	USBToolBox-1.2.0-RELEASE.zip	c315a3a5acfd496dd97d0d19b4fbd1d487103d2fd541c5651583d4c9cebcfe07	https://github.com/USBToolBox/kext/releases/download/1.2.0/USBToolBox-1.2.0-RELEASE.zip
+archive	IntelBluetooth-v2.4.0.zip	78418daa11f620012fc53ba68cbd643c2642a45f2f96c594fd01aaf2bc68fe2b	https://github.com/OpenIntelWireless/IntelBluetoothFirmware/releases/download/v2.4.0/IntelBluetooth-v2.4.0.zip
+archive	AirportItlwm-Sequoia-v2.4.0-RELEASE-alpha-738d4c6.zip	865d0096dc3dc36b4ac5f60a5896216bfde5774e2c1f175e66ac4761f834937e	https://github.com/laobamac/itlwm/releases/download/v2.4.0-alpha/AirportItlwm-Sequoia-v2.4.0-RELEASE-alpha-738d4c6.zip
+archive	AMFIPass-v1.4.1-Mod-RELEASE.zip	71f41de42e355d2a83e6f093ef34a5b24d0a9c9a9085830b2317f1b874f56250	https://github.com/b00t0x/WhateverXe-Graphics/raw/444b348e7ee757ded480ff46d781d5efb0f5fb38/extras/AMFIPass-v1.4.1-Mod-RELEASE.zip
+archive	HfsPlus.efi	a55b5fff36578864ba6792c4c6369c71f6f35b61dd5a853ddf8583cd36c31d8f	https://raw.githubusercontent.com/acidanthera/OcBinaryData/c2a98980d3/Drivers/HfsPlus.efi
+# 从发布包取出的文件：EFI 内路径	来源包	包内路径	SHA-256
+file	EFI/BOOT/BOOTx64.efi	OpenCore-1.0.8-DEBUG.zip	X64/EFI/BOOT/BOOTx64.efi	7b26e33bfd84fbc5025fcb16994f7eda3224d15edcfc004d71c8761e08a766fd
+file	EFI/OC/Drivers/HfsPlus.efi	HfsPlus.efi	-	a55b5fff36578864ba6792c4c6369c71f6f35b61dd5a853ddf8583cd36c31d8f
+file	EFI/OC/Drivers/OpenRuntime.efi	OpenCore-1.0.8-DEBUG.zip	X64/EFI/OC/Drivers/OpenRuntime.efi	cf2df818f7510ca1be321f1ff6481fcbe246c92b16a905ffc5ff654158e05b66
+file	EFI/OC/Drivers/ResetNvramEntry.efi	OpenCore-1.0.8-DEBUG.zip	X64/EFI/OC/Drivers/ResetNvramEntry.efi	e89433174be279f16a71cd19da8699baf6bc6f8372b642d3b3ed7eac4222166a
+file	EFI/OC/Kexts/AMFIPass.kext/Contents/Info.plist	AMFIPass-v1.4.1-Mod-RELEASE.zip	AMFIPass.kext/Contents/Info.plist	eb3fda04c0e8c8ce0ef4cfc984dcfb771db6aee476d379bd4bc3b7a74a00e4e9
+file	EFI/OC/Kexts/AMFIPass.kext/Contents/MacOS/AMFIPass	AMFIPass-v1.4.1-Mod-RELEASE.zip	AMFIPass.kext/Contents/MacOS/AMFIPass	2d36aeca1740b258e6bb0b66844b5bfb59a0edb7cdd9ef78206689e5d223d8dc
+file	EFI/OC/Kexts/AMFIPass.kext/Contents/_CodeSignature/CodeResources	AMFIPass-v1.4.1-Mod-RELEASE.zip	AMFIPass.kext/Contents/_CodeSignature/CodeResources	6686de10a28a2fe11b36cbb86dcbacc827cfc4ea116b4dabf1845e5aee629e9b
+file	EFI/OC/Kexts/AirportItlwm.kext/Contents/Info.plist	AirportItlwm-Sequoia-v2.4.0-RELEASE-alpha-738d4c6.zip	AirportItlwm.kext/Contents/Info.plist	4628e59d1c4883d2d90bc39fe1aff60f59c9533a5f32597bc97cbca87b6f14ff
+file	EFI/OC/Kexts/AirportItlwm.kext/Contents/MacOS/AirportItlwm	AirportItlwm-Sequoia-v2.4.0-RELEASE-alpha-738d4c6.zip	AirportItlwm.kext/Contents/MacOS/AirportItlwm	ec4c1fc83c0618be39b930fde1bf21fa3c467cf53490fa580245967869d45b0a
+file	EFI/OC/Kexts/AppleALC.kext/Contents/MacOS/AppleALC	AppleALC-1.9.8-RELEASE.zip	AppleALC.kext/Contents/MacOS/AppleALC	690b96189491b9d6f64aa552da6684714d80ade4ad4ec9027251c3257a2d16e8
+file	EFI/OC/Kexts/BlueToolFixup.kext/Contents/Info.plist	BrcmPatchRAM-2.7.2-RELEASE.zip	BlueToolFixup.kext/Contents/Info.plist	a0fcdb909add9c5201f1b188f0a8a70ded80a29f29b9b8a74960cc2aff8ed85a
+file	EFI/OC/Kexts/BlueToolFixup.kext/Contents/MacOS/BlueToolFixup	BrcmPatchRAM-2.7.2-RELEASE.zip	BlueToolFixup.kext/Contents/MacOS/BlueToolFixup	f3244382a43866138ff449b14f1e54fb069ad3e4b14cbc753858650efdbbce52
+file	EFI/OC/Kexts/ECEnabler.kext/Contents/Info.plist	ECEnabler-1.0.6-RELEASE.zip	ECEnabler.kext/Contents/Info.plist	b547b4255c09081a714d12406422ebfc3ca6b1bd2b2a2cc2f2724178cb1c0ecf
+file	EFI/OC/Kexts/ECEnabler.kext/Contents/MacOS/ECEnabler	ECEnabler-1.0.6-RELEASE.zip	ECEnabler.kext/Contents/MacOS/ECEnabler	af2a3a6790a37f5ba71fbeaebc4e4e0d4f44cbbd6966089f0a8f7a454175213a
+file	EFI/OC/Kexts/IntelBTPatcher.kext/Contents/Info.plist	IntelBluetooth-v2.4.0.zip	IntelBTPatcher.kext/Contents/Info.plist	c452e60a4655b8189719d7cd96b0e49499cb9144e568c4990041dfd23acbe4d5
+file	EFI/OC/Kexts/IntelBTPatcher.kext/Contents/MacOS/IntelBTPatcher	IntelBluetooth-v2.4.0.zip	IntelBTPatcher.kext/Contents/MacOS/IntelBTPatcher	a0f75047d3f33dcd6143bb3200a5a4ef99f163bb3435dd04757bd68547259322
+file	EFI/OC/Kexts/IntelBluetoothFirmware.kext/Contents/Info.plist	IntelBluetooth-v2.4.0.zip	IntelBluetoothFirmware.kext/Contents/Info.plist	11ab8f27d377b4d5d1546fa3dbb4b01b6847576fd0156f98a758b85242d5c928
+file	EFI/OC/Kexts/IntelBluetoothFirmware.kext/Contents/MacOS/IntelBluetoothFirmware	IntelBluetooth-v2.4.0.zip	IntelBluetoothFirmware.kext/Contents/MacOS/IntelBluetoothFirmware	e2b5ae657b93c5d746acaa40652f6af96a305a892111f1dd0c8ea6a717a6c109
+file	EFI/OC/Kexts/Lilu.kext/Contents/Info.plist	Lilu-1.7.2-RELEASE.zip	Lilu.kext/Contents/Info.plist	b7798755a2dda3006783341efa5837444ceda21c7a743651276e1accbb8d4dd3
+file	EFI/OC/Kexts/Lilu.kext/Contents/MacOS/Lilu	Lilu-1.7.2-RELEASE.zip	Lilu.kext/Contents/MacOS/Lilu	ff98508b40a1eb5fb477029db8886412520f8e39965279ea331c99e3d2e3b274
+file	EFI/OC/Kexts/NVMeFix.kext/Contents/Info.plist	NVMeFix-1.1.3-RELEASE.zip	NVMeFix.kext/Contents/Info.plist	37c3f3927190728514ea7a352ae3909c23c9c76bb6305cea4d7445fabdb31a30
+file	EFI/OC/Kexts/NVMeFix.kext/Contents/MacOS/NVMeFix	NVMeFix-1.1.3-RELEASE.zip	NVMeFix.kext/Contents/MacOS/NVMeFix	3e2632eaf09c6cb87e88c5681371e194c53b6653ddbf8693f0bbb1ae42470ef8
+file	EFI/OC/Kexts/SMCBatteryManager.kext/Contents/Info.plist	VirtualSMC-1.3.8-RELEASE.zip	Kexts/SMCBatteryManager.kext/Contents/Info.plist	99f711358e27a5307f430472360ce99648f850bb0307ed84d7eaa6b014417f26
+file	EFI/OC/Kexts/SMCBatteryManager.kext/Contents/MacOS/SMCBatteryManager	VirtualSMC-1.3.8-RELEASE.zip	Kexts/SMCBatteryManager.kext/Contents/MacOS/SMCBatteryManager	2f0b3525cd85e803b8247ff959f16e3f434d3b8126328e11086b9c0bfddf9216
+file	EFI/OC/Kexts/SMCBatteryManager.kext/Contents/Resources/SSDT-BATC.dsl	VirtualSMC-1.3.8-RELEASE.zip	Kexts/SMCBatteryManager.kext/Contents/Resources/SSDT-BATC.dsl	e66bbd57e5c6ef0ddbc3a6e51f68fe875d84709b73d4772e1c193269f2a89e4b
+file	EFI/OC/Kexts/USBToolBox.kext/Contents/Info.plist	USBToolBox-1.2.0-RELEASE.zip	USBToolBox.kext/Contents/Info.plist	f6095d4d3b026aa05169a71b32313d343ab4ac114a2be667dd64479d6643cab3
+file	EFI/OC/Kexts/USBToolBox.kext/Contents/MacOS/USBToolBox	USBToolBox-1.2.0-RELEASE.zip	USBToolBox.kext/Contents/MacOS/USBToolBox	c5c8dc205a079ee3f90b7875fb5ff622e4f15d32f29cf519123dab2822c422b7
+file	EFI/OC/Kexts/VirtualSMC.kext/Contents/Info.plist	VirtualSMC-1.3.8-RELEASE.zip	Kexts/VirtualSMC.kext/Contents/Info.plist	6d3cf2e1ee61a428b3477cb332fbd285eba715ecfceb12a05cc7b3fda2b95f89
+file	EFI/OC/Kexts/VirtualSMC.kext/Contents/MacOS/VirtualSMC	VirtualSMC-1.3.8-RELEASE.zip	Kexts/VirtualSMC.kext/Contents/MacOS/VirtualSMC	b55cd581b0127fe1a0ac050a69129ba5012b4547f6a9d1abfa3ad41849a2a246
+file	EFI/OC/Kexts/VoodooI2C.kext/Contents/MacOS/VoodooI2C	VoodooI2C-2.9.1-RELEASE.zip	VoodooI2C.kext/Contents/MacOS/VoodooI2C	78213b539c31a158bd3fce3fea7bf0da8380c442a94f2b13ddd91d43717c9037
+file	EFI/OC/Kexts/VoodooI2C.kext/Contents/PlugIns/VoodooI2CServices.kext/Contents/Info.plist	VoodooI2C-2.9.1-RELEASE.zip	VoodooI2C.kext/Contents/PlugIns/VoodooI2CServices.kext/Contents/Info.plist	d2673dc757b113df1df0ef1c8a218d80b9c5aef6abe5f515a64787a8cd10cc66
+file	EFI/OC/Kexts/VoodooI2C.kext/Contents/PlugIns/VoodooI2CServices.kext/Contents/MacOS/VoodooI2CServices	VoodooI2C-2.9.1-RELEASE.zip	VoodooI2C.kext/Contents/PlugIns/VoodooI2CServices.kext/Contents/MacOS/VoodooI2CServices	20c1544ab48ea9fdfb3498436e23d76f11d309d5adcdc8a4da35f8e4be7945f5
+file	EFI/OC/Kexts/VoodooI2C.kext/Contents/PlugIns/VoodooI2CServices.kext/Contents/_CodeSignature/CodeResources	VoodooI2C-2.9.1-RELEASE.zip	VoodooI2C.kext/Contents/PlugIns/VoodooI2CServices.kext/Contents/_CodeSignature/CodeResources	6686de10a28a2fe11b36cbb86dcbacc827cfc4ea116b4dabf1845e5aee629e9b
+file	EFI/OC/Kexts/VoodooI2C.kext/Contents/PlugIns/VoodooInput.kext/Contents/Info.plist	VoodooI2C-2.9.1-RELEASE.zip	VoodooI2C.kext/Contents/PlugIns/VoodooInput.kext/Contents/Info.plist	8eb279b036ced4bc790132d5839322b97f62d0a91f334092e6a098d7fed43f37
+file	EFI/OC/Kexts/VoodooI2C.kext/Contents/PlugIns/VoodooInput.kext/Contents/MacOS/VoodooInput	VoodooI2C-2.9.1-RELEASE.zip	VoodooI2C.kext/Contents/PlugIns/VoodooInput.kext/Contents/MacOS/VoodooInput	fbdd452f575139cd32c56a4b059b794be884262fb8e335d469dd4bfe4004853f
+file	EFI/OC/Kexts/VoodooI2C.kext/Contents/PlugIns/VoodooInput.kext/Contents/_CodeSignature/CodeResources	VoodooI2C-2.9.1-RELEASE.zip	VoodooI2C.kext/Contents/PlugIns/VoodooInput.kext/Contents/_CodeSignature/CodeResources	6686de10a28a2fe11b36cbb86dcbacc827cfc4ea116b4dabf1845e5aee629e9b
+file	EFI/OC/Kexts/VoodooI2CHID.kext/Contents/Info.plist	VoodooI2C-2.9.1-RELEASE.zip	VoodooI2CHID.kext/Contents/Info.plist	5c9e6eea43bcfb48740a860b6a622579b7b837afe93825d093b38c3be206c807
+file	EFI/OC/Kexts/VoodooI2CHID.kext/Contents/MacOS/VoodooI2CHID	VoodooI2C-2.9.1-RELEASE.zip	VoodooI2CHID.kext/Contents/MacOS/VoodooI2CHID	65975f7018ef10e2f058f46492f52fe49a5e5e2680dc7cf66af12b167f1d7f0a
+file	EFI/OC/Kexts/VoodooI2CHID.kext/Contents/_CodeSignature/CodeResources	VoodooI2C-2.9.1-RELEASE.zip	VoodooI2CHID.kext/Contents/_CodeSignature/CodeResources	6686de10a28a2fe11b36cbb86dcbacc827cfc4ea116b4dabf1845e5aee629e9b
+file	EFI/OC/Kexts/VoodooPS2Controller.kext/Contents/Info.plist	VoodooPS2Controller-2.3.7-RELEASE.zip	VoodooPS2Controller.kext/Contents/Info.plist	8aa06881627cd459cdf293a2903037d2df47548ee5b3c66be179f86375fb3aa7
+file	EFI/OC/Kexts/VoodooPS2Controller.kext/Contents/MacOS/VoodooPS2Controller	VoodooPS2Controller-2.3.7-RELEASE.zip	VoodooPS2Controller.kext/Contents/MacOS/VoodooPS2Controller	f78d6bf95fb403eccdebf3590015606d5ce4ea73bb78c3f1f20f03ce037b4e24
+file	EFI/OC/Kexts/VoodooPS2Controller.kext/Contents/PlugIns/VoodooPS2Keyboard.kext/Contents/Info.plist	VoodooPS2Controller-2.3.7-RELEASE.zip	VoodooPS2Controller.kext/Contents/PlugIns/VoodooPS2Keyboard.kext/Contents/Info.plist	2fc964e03056dbd290df3891f8d105eab9bdd471160db2cdf2b21fdd634fbf87
+file	EFI/OC/Kexts/VoodooPS2Controller.kext/Contents/PlugIns/VoodooPS2Keyboard.kext/Contents/MacOS/VoodooPS2Keyboard	VoodooPS2Controller-2.3.7-RELEASE.zip	VoodooPS2Controller.kext/Contents/PlugIns/VoodooPS2Keyboard.kext/Contents/MacOS/VoodooPS2Keyboard	b55758219af1b12b1c0e5e116ff1ee65dc5d8484086e5231103c242a5858a1e5
+file	EFI/OC/OpenCore.efi	OpenCore-1.0.8-DEBUG.zip	X64/EFI/OC/OpenCore.efi	11ba0b763d765fb82187214d1fa2ee5a9330f851461c12e34d532b7b91097875
