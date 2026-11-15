@@ -57,7 +57,7 @@ python3 tools/s0ix/stage_usb_efi.py \
 
 ### 2. 生成 Phase 1 实验 U 盘 EFI（纯平台 Deep Idle `SleepType=7` 破冰）
 
-自动写入 `_S3_ -> XS3_` 与 `PEPD._STA -> XSTA` 两条 DSDT 补丁、启用 `SSDT-DEEPIDLE.aml`、注入 `S0ixStandby.kext`（支持传入 `.kext` 目录或官方 `Release.zip`），并将 `boot-args` 切换为 `-v keepsyms=1 debug=0x100 -allow3d -disablegfxfirmware alcid=19 alcapplid=19 -wex-noaccel -s0ixdbg`：
+自动写入 `_S3_ -> XS3_` 与 `PEPD._STA -> XSTA` 两条 DSDT 补丁、启用 `SSDT-DEEPIDLE.aml`、注入 `S0ixStandby.kext`（支持传入 `.kext` 目录或官方 `Release.zip`），并在保留全部 5 个 Sharp 4K 帧缓冲守卫参数的基础上追加 `-wex-noaccel -s0ixdbg`（即 `-v keepsyms=1 debug=0x100 -allow3d -disablegfxfirmware alcid=19 alcapplid=19 -wex-tgl-sdt-guard -noDC9 -nodisplaysleepDC6 -wex-no-panel-keep -wex-sink-rate-restore -wex-noaccel -s0ixdbg`；因为 `-wex-noaccel` 仅禁用 3D 加速器 `AppleIntelTGLGraphics`，`AppleIntelTGLGraphicsFramebuffer` 仍会加载驱动内屏，缺失 `-wex-tgl-sdt-guard` 会在光标初始化 `computeWatermarkValue` 时触发除零内核崩溃）：
 
 ```bash
 python3 tools/s0ix/stage_usb_efi.py \

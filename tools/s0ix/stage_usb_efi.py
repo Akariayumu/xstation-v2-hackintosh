@@ -9,9 +9,11 @@ Enforces the Zero-Brick Safety Contract from docs/research/s0ix-roadmap-20261115
   - Phase 0: Keeps baseline production boot-args (SleepDisabled=1), excludes
     SSDT-DEEPIDLE.aml and S0ix DSDT patches / S0ixStandby.kext.
   - Phase 1: Applies the 2 binary-unique DSDT patches (_S3_ -> XS3_, PEPD._STA -> XSTA),
-    enables SSDT-DEEPIDLE.aml, registers S0ixStandby.kext, sets orthogonal
-    Phase 1 boot-args (-wex-noaccel -s0ixdbg), and optionally binary-verifies
-    all DSDT patches against a raw dsdt.dat dump.
+    enables SSDT-DEEPIDLE.aml, registers S0ixStandby.kext, retains all 5 Sharp 4K
+    framebuffer guards (-wex-tgl-sdt-guard -noDC9 -nodisplaysleepDC6 -wex-no-panel-keep
+    -wex-sink-rate-restore) alongside -wex-noaccel -s0ixdbg (since -wex-noaccel only
+    disables AppleIntelTGLGraphics IntelAccelerator while AppleIntelTGLGraphicsFramebuffer
+    still loads), and optionally binary-verifies all DSDT patches against a raw dsdt.dat dump.
 """
 
 from __future__ import annotations
@@ -35,7 +37,8 @@ XSTATION_DSDT_OEM_TABLE_ID = bytes.fromhex("41204D2049200000")  # "A M I \x00\x0
 
 PHASE1_BOOT_ARGS = (
     "-v keepsyms=1 debug=0x100 -allow3d -disablegfxfirmware "
-    "alcid=19 alcapplid=19 -wex-noaccel -s0ixdbg"
+    "alcid=19 alcapplid=19 -wex-tgl-sdt-guard -noDC9 -nodisplaysleepDC6 "
+    "-wex-no-panel-keep -wex-sink-rate-restore -wex-noaccel -s0ixdbg"
 )
 
 S0IX_DSDT_PATCHES: tuple[dict[str, Any], ...] = (
@@ -352,7 +355,7 @@ def transform_config_plist(
         boot_args = baseline_boot_args
     else:
         # Phase 1: Append the 2 DSDT binary patches, enable SSDT-DEEPIDLE.aml, enable S0ixStandby.kext,
-        # and set orthogonal Phase 1 boot-args (-wex-noaccel -s0ixdbg).
+        # and retain all 5 Sharp 4K framebuffer guards alongside -wex-noaccel -s0ixdbg.
         for target_patch in S0IX_DSDT_PATCHES:
             key = (target_patch["Find"], target_patch["Replace"], target_patch["TableSignature"])
             existing = next(

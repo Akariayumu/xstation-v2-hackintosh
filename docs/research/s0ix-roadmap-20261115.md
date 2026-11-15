@@ -216,10 +216,15 @@ pmset -g
 
 ---
 
-### Phase 1：纯平台 S0ix (`IOPMSystemSleepType = 7`) 破冰（`-wex-noaccel` 剥离核显）
+### Phase 1：纯平台 S0ix (`IOPMSystemSleepType = 7`) 破冰（`-wex-noaccel` 剥离 3D 渲染加速）
 
 #### 3.1.1 阶段目标
-采用**正交二分法**：临时在 U 盘 `boot-args` 中加入 **`-wex-noaccel`** 彻底剥离核显渲染/帧缓冲驱动，专注打通 **OpenCore `_S3` 屏蔽 + 原生 `PEPD` 暴露 + `SSDT-DEEPIDLE.aml` + `S0ixStandby.kext v0.5.4` + RTC 定时自动唤醒**，首次在 X-STATION V2 上实机跑通 `IOPMSystemSleepType = 7` 睡眠与唤醒闭环。
+采用**正交二分法**：临时在 U 盘 `boot-args` 中加入 **`-wex-noaccel`** 仅剥离核显 3D/Metal 加速器（`AppleIntelTGLGraphics` / `IntelAccelerator::probe`），专注打通 **OpenCore `_S3` 屏蔽 + 原生 `PEPD` 暴露 + `SSDT-DEEPIDLE.aml` + `S0ixStandby.kext v0.5.4` + RTC 定时自动唤醒**，首次在 X-STATION V2 上实机跑通 `IOPMSystemSleepType = 7` 睡眠与唤醒闭环。
+
+> [!CAUTION]
+> **关键机制澄清（`-wex-noaccel` ≠ VESA；必须保留全部 5 个 Sharp 4K 帧缓冲守卫参数）**：
+> - 在 `WhateverXe 0.8.2` 源码（`kern_xe.cpp:3940-3951, 4650-4652, 11343-11354, 17618-17656`）中，`-wex-noaccel` 仅置 `tglAcceleratorRequested = false` 并拦截 `IntelAccelerator::probe`，**`AppleIntelTGLGraphicsFramebuffer` 仍会正常加载并接管 Sharp 3840×2400 eDP 内屏**（只有 `-wex-tgl-off` 才退回 GOP VESA）。若在 Phase 1 误删 `-wex-tgl-sdt-guard`，当 `AppleUserHIDEventDriver` 启用鼠标光标调用 `computeWatermarkValue` 时会立即触发 `RBX=0` 除零 `#DE` 内核崩溃！因此 Phase 1 必须完整保留 **`-wex-tgl-sdt-guard -noDC9 -nodisplaysleepDC6 -wex-no-panel-keep -wex-sink-rate-restore`**。
+> - **跨版本兼容边界（`ceb7bae3` `WhateverXeGraphicsABI`）**：U 盘 `WhateverXe 0.8.2` 在 `-wex-noaccel` 下与系统盘 `/Library/Extensions` 现役 `WhateverXe-Graphics v0.2.0`（`AppleIntelTGLCompat 0.5.0`）ABI 100% 正向兼容（`ProbeABI = 3`、`sizeof(ProbeConfig) = 64`、全部 10 处字节守卫偏移完全一致），因此 Phase 1 可在尚未升级 `/L/E` 的情况下先行验证，使内置 NVMe `v0.1.55`（`WhateverXe 0.5.0`）保持 100% 满血加速兜底；反之，一旦将 `/L/E` 升级为 `Graphics v0.4.4`（`AppleIntelTGLCompat 0.8.2` 检查 `WhateverXeGraphicsABI = 1`），内置 NVMe 旧版 `WhateverXe 0.5.0` 启动时将自动退回 GOP VESA 直至同步升级 `WhateverXe 0.8.2`。
 
 #### 3.1.2 精确 ACPI 补丁与 `SSDT-DEEPIDLE.dsl` 实现
 
@@ -281,9 +286,9 @@ pmset -g
    }
    ```
 3. **注入 `S0ixStandby.kext v0.5.4`（tag `c52f172`）**：放入 U 盘 `EFI/OC/Kexts/S0ixStandby.kext` 并在 `Kernel -> Add` 启用（纯 IOKit 驱动，`MinKernel = 24.0.0`）。
-4. **U 盘 Phase 1 实验 `boot-args`**（注意：**暂不加 `-s0ixd3`**，避免干扰无驱动 PCI 设备）：
+4. **U 盘 Phase 1 实验 `boot-args`**（保留全部 5 个 Sharp 4K 帧缓冲守卫参数并追加 `-wex-noaccel -s0ixdbg`；**暂不加 `-s0ixd3`**，避免干扰无驱动 PCI 设备）：
    ```text
-   -v keepsyms=1 debug=0x100 -allow3d -disablegfxfirmware alcid=19 alcapplid=19 -wex-noaccel -s0ixdbg
+   -v keepsyms=1 debug=0x100 -allow3d -disablegfxfirmware alcid=19 alcapplid=19 -wex-tgl-sdt-guard -noDC9 -nodisplaysleepDC6 -wex-no-panel-keep -wex-sink-rate-restore -wex-noaccel -s0ixdbg
    ```
 
 #### 3.1.3 实机验证步骤与准出判据（Gate 1）
@@ -305,7 +310,7 @@ pmset -g log | tail -n 60
 ```
 - **准出判据**：
   1. `IOPMDeepIdleSupported = Yes`，且 `PEPD` 下成功挂载 `S0ixStandby`，属性显示 `"CPU model" = 140` (`0x8C`，确认裸 `cpuid` 指令未受 OpenCore `Cpuid1Data` Ice Lake 仿冒影响；万一被拦截则加 `-s0ixgpureset`)、`"GPU" = "reset on Deep Idle wake if state kept"`、`"DSM Intel mask" = 127` (`0x7f`)、`"Residency counter address" = "0xfe00193c"`，且 `"PKG_CST_CONFIG_CONTROL"` 包含 `limit C10`（睡眠后另有 `"Last 0xE2 at sleep"`）。
-  2. 90 秒后机器被 RTC 准时唤醒回到桌面，`IOPMSystemSleepType = 7`，`"Last DSM entry/exit" = Yes`（Fn 3/5 与 Fn 6/4 成功执行；注：`-wex-noaccel` VESA 模式下显示管道未关断，此时 `"Last C-state percent"` 中 `PC10` 尚为 `0%` 属正常物理现象，将在 Phase 2 放开帧缓冲与 DC9 后解锁）。
+  2. 90 秒后机器被 RTC 准时唤醒回到桌面，`IOPMSystemSleepType = 7`，`"Last DSM entry/exit" = Yes`（Fn 3/5 与 Fn 6/4 成功执行；注：`-wex-noaccel` 仅禁用 3D 渲染加速器，`AppleIntelTGLGraphicsFramebuffer` 仍加载驱动 4K 内屏，且 Phase 1 暂保留 `-noDC9` 将显示引擎钉在 `DC0`，故此时 `"Last C-state percent"` 中 `PC10` 尚为 `0%`、`PC8 ~51%` 属正常硬件现象，将在 Phase 2 Step 2.2 移除 `-noDC9` 放开真 DC9 后解锁）。
 - **回滚方案**：若睡眠卡死，长按电源键重启，执行 `sudo pmset -a SleepDisabled 1` 或拔掉 U 盘直接回退生产 EFI。
 
 ---
@@ -418,7 +423,7 @@ pmset -g log | tail -n 60
 | 阶段 | 核心新增/变更文件（均先在 U 盘 EFI 执行） | 关键 `boot-args` 演进（相对上一阶段增量） | 核心验收指标 | 一键回滚锚点 |
 | :--- | :--- | :--- | :--- | :--- |
 | **Phase 0** | `WhateverXe 0.8.2` + 变基补丁、`Graphics v0.4.4`、解锁 `24.6.0` 内核锁、**`WriteFlash=false`** | 保持现役参数不变（`SleepDisabled=1`） | 4K@60Hz + Metal + Photo Booth 正常，关屏 `~3.8 W` | 拔除 U 盘 + 还原 `/L/E/AppleIntelTGL*` 备份 |
-| **Phase 1** | `DSDT` 补丁 (`_S3->XS3`, `PEPD._STA->XSTA`) + `SSDT-DEEPIDLE.aml` + `S0ixStandby v0.5.4` | `+ -wex-noaccel + -s0ixdbg`（解锁 `pmset SleepDisabled=0`） | `IOPMSystemSleepType = 7`，`PEPD` 挂载，RTC 90s 唤醒成功 | 拔除 U 盘 + `sudo pmset -a SleepDisabled 1` |
+| **Phase 1** | `DSDT` 补丁 (`_S3->XS3`, `PEPD._STA->XSTA`) + `SSDT-DEEPIDLE.aml` + `S0ixStandby v0.5.4` | 保留现役全部 4K 帧缓冲保护参数 `+ -wex-noaccel + -s0ixdbg`（解锁 `pmset SleepDisabled=0`） | `IOPMSystemSleepType = 7`，`PEPD` 挂载，RTC 90s 唤醒成功 | 拔除 U 盘 + `sudo pmset -a SleepDisabled 1` |
 | **Phase 2** | 按需调整 `wrapTGLPortTraining` `DPCD 0x115` 退避或 `B5` 分支 B 归并兜底 | `- -wex-noaccel`，Step 2.2 **`- -noDC9`**（可选 `+ -s0ixrefclk`） | 4K@60Hz 唤醒 ≤3s，进 `DC9`，**`PC10 ≥ 85%`**，功耗 **`< 1.5 W`** | U 盘临时加回 `-noDC9` 或 `-wex-noaccel` |
 | **Phase 3** | 按需增加 `SSDT-BATFULL.aml` 及 WEX CSB12 唤醒同步补丁 | **`+ -s0ixacnortc`**（可选 `+ -wex-tgl-s0-csb-resync`） | 带载 10 循环 0 `EL-null` panic；插电 2h+ 0 DarkWake 死锁 | 对照切换 `GDRST` / `0.7.0` 备份 |
 | **Phase 4** | `acpi/SSDT-DEEPIDLE.dsl` (`PWRB.PRW0`)、按需更新 `SSDT-PWRBEC` / `VoodooI2C` / `PowerKeyDialog.swift` | 方案 B 备选 `+ -s0ixecwake`；功耗精调 `+ -s0ixwifipm` | 物理电源键双向睡/醒；20 次循环 + 离/插电双 8h 过夜全绿 | 移除 `PRW0`/`-s0ixecwake` 退回 RTC/菜单唤醒 |

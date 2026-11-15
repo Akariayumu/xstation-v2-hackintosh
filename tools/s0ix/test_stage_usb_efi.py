@@ -227,12 +227,29 @@ class StageUsbEfiTests(unittest.TestCase):
         self.assertIsNotNone(res["dsdt_verification"])
         self.assertEqual(len(res["dsdt_verification"]["matches"]), 5)
 
+        with REPO_CONFIG.open("rb") as f:
+            orig_cfg = plistlib.load(f)
+        orig_boot_args = orig_cfg["NVRAM"]["Add"][mod.APPLE_BOOT_GUID]["boot-args"]
+
         with (out_dir / "EFI" / "OC" / "config.plist").open("rb") as f:
             cfg = plistlib.load(f)
 
-        # Verify WriteFlash == False & Phase 1 boot-args
+        # Verify WriteFlash == False & Phase 1 boot-args (retaining all 5 Sharp 4K framebuffer guards)
         self.assertIs(cfg["NVRAM"]["WriteFlash"], False)
-        self.assertEqual(cfg["NVRAM"]["Add"][mod.APPLE_BOOT_GUID]["boot-args"], mod.PHASE1_BOOT_ARGS)
+        staged_boot_args = cfg["NVRAM"]["Add"][mod.APPLE_BOOT_GUID]["boot-args"]
+        self.assertEqual(staged_boot_args, mod.PHASE1_BOOT_ARGS)
+        self.assertEqual(staged_boot_args, f"{orig_boot_args} -wex-noaccel -s0ixdbg")
+        boot_arg_tokens = set(staged_boot_args.split())
+        for required_flag in (
+            "-wex-tgl-sdt-guard",
+            "-noDC9",
+            "-nodisplaysleepDC6",
+            "-wex-no-panel-keep",
+            "-wex-sink-rate-restore",
+            "-wex-noaccel",
+            "-s0ixdbg",
+        ):
+            self.assertIn(required_flag, boot_arg_tokens)
 
         # Verify SSDT-DEEPIDLE.aml on disk and enabled in ACPI -> Add
         staged_aml = out_dir / "EFI" / "OC" / "ACPI" / "SSDT-DEEPIDLE.aml"
