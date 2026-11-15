@@ -1,5 +1,5 @@
 /*
- * X-STATION V2 S0ix Deep Idle Enabler + Native \_SB.PEPD Darwin Expose (Phase 1)
+ * X-STATION V2 S0ix Deep Idle Enabler + Native \_SB.PEPD Expose + PWRB GPE 0x6E Wake
  *
  * 作用：
  *   1. 在 Darwin 下向系统暴露 \_SB.LPS0 = 1 与 \_GPE.LXEN = 1，使 AppleACPIPlatform
@@ -9,6 +9,11 @@
  *      而本机不注入全局 SSDT-XOSI，macOS 下 OSYS == 0x03E8 导致原生 PEPD._STA 返回 0），
  *      使 S0ixStandby.kext（IONameMatch = PNP0D80）可正常挂载并调用 PEPD._DSM。
  *      非 Darwin 系统（Windows / Linux）透传调用原厂 XSTA()，100% 零干扰。
+ *   3. 在 Darwin 下为 \_SB.PWRB 提供 PRW0 方法返回 Package (0x02) { 0x6E, 0x04 }：
+ *      XNU acpi_idle_kernel() 中 AppleACPIPlatform 的 S0 回调晚于 IOCPURunPlatformQuiesceActions
+ *      执行 AcpiHwDisableAllGpes()，随后优先依据 PRW0（"acpi-wake-s0-gpe"）重新使能 S0 唤醒 GPE。
+ *      原厂 \_SB.PWRB._PRW 返回 { 0x43, 0x04 }，而物理电源键由 H_EC GPE 0x6E 触发；
+ *      通过 PRW0 声明 0x6E 使物理电源键可在 S0ix 下直接触发 SCI 唤醒，非 Darwin 透传 \_PRW()。
  *
  * 必须配对的 OpenCore ACPI -> Patch 补丁（DSDT, OemTableId = "A M I \0\0" / QSBNIEkgAAA=）：
  *   1. Disable _S3 for S0ix: Name(_S3_) to XS3_
@@ -19,23 +24,13 @@
  *      Find:    14 27 5F 53 54 41 00 (Base64: FCdfU1RBAA==)
  *      Replace: 14 27 58 53 54 41 00 (Base64: FCdYU1RBAA==)
  *      Count:   1                    (dsdt.dat 偏移 0x3B58D，全表及 19 张 SSDT 唯一)
- *
- * Phase 4 可选扩展（物理电源键通过 H_EC GPE 0x6E 唤醒；Phase 1-3 使用 RTC 定时唤醒期间暂不启用，
- * 详见 docs/research/s0ix-roadmap-20261115.md §3.4.2）：
- *
- *   External (\_SB.PWRB, DeviceObj)
- *   Scope (\_SB.PWRB)
- *   {
- *       If (_OSI ("Darwin"))
- *       {
- *           Name (PRW0, Package (0x02) { 0x6E, 0x04 })
- *       }
- *   }
  */
-DefinitionBlock ("", "SSDT", 2, "XSTA", "DEEPIDLE", 0x00001000)
+DefinitionBlock ("", "SSDT", 2, "XSTA", "DEEPIDLE", 0x00001001)
 {
     External (\_SB.PEPD, DeviceObj)
     External (\_SB.PEPD.XSTA, MethodObj)
+    External (\_SB.PWRB, DeviceObj)
+    External (\_SB.PWRB._PRW, MethodObj)
 
     Scope (\_SB)
     {
@@ -73,6 +68,23 @@ DefinitionBlock ("", "SSDT", 2, "XSTA", "DEEPIDLE", 0x00001000)
             }
 
             Return (XSTA ())
+        }
+    }
+
+    Scope (\_SB.PWRB)
+    {
+        Method (PRW0, 0, NotSerialized)
+        {
+            If (_OSI ("Darwin"))
+            {
+                Return (Package (0x02)
+                {
+                    0x6E,
+                    0x04
+                })
+            }
+
+            Return (\_SB.PWRB._PRW ())
         }
     }
 }

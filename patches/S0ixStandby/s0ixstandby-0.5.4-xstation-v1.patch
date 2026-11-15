@@ -1,0 +1,371 @@
+diff --git a/S0ixStandby/S0ixStandby.cpp b/S0ixStandby/S0ixStandby.cpp
+index 70b6d13..7b1611e 100644
+--- a/S0ixStandby/S0ixStandby.cpp
++++ b/S0ixStandby/S0ixStandby.cpp
+@@ -31,6 +31,8 @@
+ //                          restore on wake (experimental)
+ //              -s0ixgpuprobe  also probe an idle GPU (canary) and keep the last
+ //                          result in NVRAM (s0ix-gpu-last); for debugging
++//              -s0ixacnoecwake  disable S0 wake on ACPI devices sharing the EC
++//                          GPE while on AC, restoring wake capability on battery
+ //              s0ixfn=N    bitmask of _DSM functions allowed to run, e.g.
+ //                          s0ixfn=0x18 = display off/on only (3,4),
+ //                          s0ixfn=0x60 = entry/exit only (5,6). Default: all.
+@@ -307,6 +309,7 @@ bool S0ixStandby::start(IOService *provider)
+ 	wifiPM = bootArg("-s0ixwifipm");
+ 	refclkWA = bootArg("-s0ixrefclk");
+ 	acNoRtc = bootArg("-s0ixacnortc");
++	acNoEcWake = bootArg("-s0ixacnoecwake");
+ 	ecWake = bootArg("-s0ixecwake");
+ 	uint32_t fn = 0;
+ 	if (PE_parse_boot_argn("s0ixfn", &fn, sizeof(fn)))
+@@ -396,18 +399,42 @@ bool S0ixStandby::start(IOService *provider)
+ 		setProperty("Wi-Fi PCI PM", "pending (set up 30 s after boot)");
+ 	}
+ 
++	setupWakeInfo();
++
++	bool needAcTimer = false;
+ 	if (acNoRtc) {
+-		if (setupRtcBlock() && workLoop) {
+-			acTimer = IOTimerEventSource::timerEventSource(this, &S0ixStandby::acTimerFired);
+-			if (acTimer && workLoop->addEventSource(acTimer) != kIOReturnSuccess)
+-				OSSafeReleaseNULL(acTimer);
+-			if (acTimer) acTimer->setTimeoutMS(5000);
+-		}
++		if (setupRtcBlock())
++			needAcTimer = true;
+ 	} else {
+ 		setProperty("AC RTC wake block", "off (boot-arg -s0ixacnortc)");
+ 	}
+ 
+-	setupWakeInfo();
++	if (acNoEcWake) {
++		acWakeLock = IOLockAlloc();
++		needAcTimer = true;
++	} else {
++		setProperty("AC EC wake block", "off (boot-arg -s0ixacnoecwake)");
++	}
++
++	if (needAcTimer && workLoop) {
++		acTimer = IOTimerEventSource::timerEventSource(this, &S0ixStandby::acTimerFired);
++		if (acTimer && workLoop->addEventSource(acTimer) != kIOReturnSuccess)
++			OSSafeReleaseNULL(acTimer);
++		if (acTimer)
++			acTimer->setTimeoutMS(acNoEcWake ? 3000 : 5000);
++	}
++
++	if (acNoEcWake) {
++		syncAcWakePolicy(true);
++		if (OSDictionary *match = serviceMatching("IOPMPowerSource")) {
++			psPublishNotifier = addMatchingNotification(
++			    gIOFirstPublishNotification, match,
++			    &S0ixStandby::powerSourcePublished, this, nullptr, 0);
++			match->release();
++		}
++	} else if (acTimer) {
++		updateAC();
++	}
+ 
+ 	if (workLoop) {
+ 		battTimer = IOTimerEventSource::timerEventSource(this, &S0ixStandby::battTimerFired);
+@@ -488,6 +515,24 @@ void S0ixStandby::stop(IOService *provider)
+ 		battTimer->cancelTimeout();
+ 		if (workLoop) workLoop->removeEventSource(battTimer);
+ 	}
++	IONotifier *interest = nullptr;
++	IONotifier *publish = nullptr;
++	if (acWakeLock) IOLockLock(acWakeLock);
++	interest = psInterestNotifier;
++	psInterestNotifier = nullptr;
++	publish = psPublishNotifier;
++	psPublishNotifier = nullptr;
++	if (acWakeLock) IOLockUnlock(acWakeLock);
++	if (interest) interest->remove();
++	if (publish) publish->remove();
++	if (acNoEcWake) {
++		if (acWakeLock) IOLockLock(acWakeLock);
++		for (uint32_t i = 0; i < ecWakeDevCount; i++)
++			if (ecWakeDevs[i]) ecWakeDevs[i]->setSystemWakeCapabilityEnable(true);
++		ecWakeAppliedValid = false;
++		ecWakeAppliedEnable = true;
++		if (acWakeLock) IOLockUnlock(acWakeLock);
++	}
+ 	IOService::stop(provider);
+ }
+ 
+@@ -506,6 +551,9 @@ void S0ixStandby::free()
+ 	OSSafeReleaseNULL(acTimer);
+ 	OSSafeReleaseNULL(battTimer);
+ 	OSSafeReleaseNULL(workLoop);
++	for (uint32_t i = 0; i < ecWakeDevCount; i++) OSSafeReleaseNULL(ecWakeDevs[i]);
++	ecWakeDevCount = 0;
++	if (acWakeLock) { IOLockFree(acWakeLock); acWakeLock = nullptr; }
+ 	gpuMMIO = nullptr;
+ 	OSSafeReleaseNULL(gpuMap);
+ 	OSSafeReleaseNULL(gpuDev);
+@@ -1208,24 +1256,181 @@ void S0ixStandby::publishWakeInfo()
+ void S0ixStandby::updateAC()
+ {
+ 	bool ac = false;
++	bool seen = false;
+ 	if (OSDictionary *match = serviceMatching("IOPMPowerSource")) {
+ 		if (OSIterator *it = getMatchingServices(match)) {
+-			while (OSObject *o = it->getNextObject())
+-				if (IOService *ps = OSDynamicCast(IOService, o))
+-					if (OSBoolean *b = OSDynamicCast(OSBoolean, ps->getProperty("ExternalConnected")))
++			while (OSObject *o = it->getNextObject()) {
++				if (IOService *ps = OSDynamicCast(IOService, o)) {
++					if (OSBoolean *b = OSDynamicCast(OSBoolean, ps->getProperty("ExternalConnected"))) {
++						seen = true;
+ 						if (b->isTrue()) ac = true;
++					}
++				}
++			}
+ 			it->release();
+ 		}
+ 		match->release();
+ 	}
+-	onAC = ac;
++	if (seen) {
++		psSeen = true;
++		onAC = ac;
++	}
++}
++
++void S0ixStandby::findEcWakeDevices()
++{
++	if (ecGpe == 0xFFFFFFFF)
++		findEcGpe();
++	if (ecGpe == 0xFFFFFFFF)
++		return;
++	const IORegistryPlane *plane = IORegistryEntry::getPlane("IOACPIPlane");
++	if (!plane)
++		return;
++	IORegistryIterator *it = IORegistryIterator::iterateOver(plane, kIORegistryIterateRecursively);
++	if (!it)
++		return;
++	while (IORegistryEntry *e = it->getNextObject()) {
++		IOACPIPlatformDevice *dev = OSDynamicCast(IOACPIPlatformDevice, e);
++		if (!dev)
++			continue;
++		OSNumber *s0Gpe = OSDynamicCast(OSNumber, dev->getProperty("acpi-wake-s0-gpe"));
++		if (!s0Gpe || s0Gpe->unsigned32BitValue() != ecGpe)
++			continue;
++		if (acWakeLock) IOLockLock(acWakeLock);
++		bool exists = false;
++		for (uint32_t i = 0; i < ecWakeDevCount; i++) {
++			if (ecWakeDevs[i] == dev) {
++				exists = true;
++				break;
++			}
++		}
++		if (!exists && ecWakeDevCount < kMaxEcWakeDevs) {
++			dev->retain();
++			ecWakeDevs[ecWakeDevCount++] = dev;
++			ecWakeAppliedValid = false;
++		}
++		if (acWakeLock) IOLockUnlock(acWakeLock);
++	}
++	it->release();
++}
++
++void S0ixStandby::publishAcEcWake()
++{
++	if (!acNoEcWake) {
++		setProperty("AC EC wake block", "off (boot-arg -s0ixacnoecwake)");
++		return;
++	}
++	char names[64];
++	names[0] = 0;
++	size_t pos = 0;
++	uint32_t count = 0;
++	bool appliedValid = false;
++	bool appliedEnable = true;
++	if (acWakeLock) IOLockLock(acWakeLock);
++	count = ecWakeDevCount;
++	appliedValid = ecWakeAppliedValid;
++	appliedEnable = ecWakeAppliedEnable;
++	for (uint32_t i = 0; i < ecWakeDevCount; i++) {
++		const char *nm = (ecWakeDevs[i] && ecWakeDevs[i]->getName()) ? ecWakeDevs[i]->getName() : "?";
++		if (pos < sizeof(names)) {
++			int n = snprintf(names + pos, sizeof(names) - pos, "%s%s", i ? ", " : "", nm);
++			if (n > 0) pos += (size_t)n;
++		}
++	}
++	if (acWakeLock) IOLockUnlock(acWakeLock);
++
++	char buf[160];
++	if (ecGpe == 0xFFFFFFFF) {
++		snprintf(buf, sizeof(buf), "pending: waiting for EC _GPE");
++	} else if (!count) {
++		snprintf(buf, sizeof(buf), "pending: waiting for ACPI wake device with acpi-wake-s0-gpe == 0x%x", ecGpe);
++	} else if (!psSeen || !appliedValid) {
++		snprintf(buf, sizeof(buf), "pending: waiting for IOPMPowerSource (%s, GPE 0x%x)", names, ecGpe);
++	} else {
++		snprintf(buf, sizeof(buf), "%s: %s (GPE 0x%x) wake %s",
++		         onAC ? "on AC" : "on battery", names, ecGpe,
++		         appliedEnable ? "enabled" : "disabled");
++	}
++	setProperty("AC EC wake block", buf);
++	setProperty("On AC (last check)", onAC);
++}
++
++void S0ixStandby::syncAcWakePolicy(bool updateRegistry)
++{
++	bool prevSeen = psSeen;
++	bool prevAC = onAC;
++	if (updateRegistry) {
++		updateAC();
++		if (acNoEcWake && ecWakeDevCount == 0) {
++			bool hadEcGpe = (ecGpe != 0xFFFFFFFF);
++			findEcWakeDevices();
++			if (!hadEcGpe && ecGpe != 0xFFFFFFFF)
++				publishEcWake();
++		}
++	}
++	if (!acNoEcWake)
++		return;
++
++	bool changed = false;
++	if (psSeen) {
++		bool wantEnable = !onAC;
++		if (acWakeLock) IOLockLock(acWakeLock);
++		if (ecWakeDevCount > 0 && (!ecWakeAppliedValid || ecWakeAppliedEnable != wantEnable || !updateRegistry)) {
++			changed = (!ecWakeAppliedValid || ecWakeAppliedEnable != wantEnable);
++			for (uint32_t i = 0; i < ecWakeDevCount; i++) {
++				if (ecWakeDevs[i])
++					ecWakeDevs[i]->setSystemWakeCapabilityEnable(wantEnable);
++			}
++			ecWakeAppliedEnable = wantEnable;
++			ecWakeAppliedValid = true;
++		}
++		if (acWakeLock) IOLockUnlock(acWakeLock);
++	}
++
++	if (updateRegistry) {
++		publishAcEcWake();
++		if (psSeen && (!prevSeen || prevAC != onAC || changed))
++			battCheck();
++		if (changed) {
++			if (OSString *s = OSDynamicCast(OSString, getProperty("AC EC wake block")))
++				LOG("AC EC wake block: %s", s->getCStringNoCopy());
++			publishLog();
++		}
++	}
++}
++
++bool S0ixStandby::powerSourcePublished(void *target, void *, IOService *newService, IONotifier *)
++{
++	S0ixStandby *self = OSDynamicCast(S0ixStandby, static_cast<OSObject *>(target));
++	if (!self || !newService)
++		return true;
++	if (self->acWakeLock) IOLockLock(self->acWakeLock);
++	if (!self->psInterestNotifier) {
++		self->psInterestNotifier = newService->registerInterest(
++		    gIOGeneralInterest, &S0ixStandby::powerSourceInterest, self, nullptr);
++	}
++	if (self->acWakeLock) IOLockUnlock(self->acWakeLock);
++	if (self->acTimer)
++		self->acTimer->setTimeoutMS(1);
++	return true;
++}
++
++IOReturn S0ixStandby::powerSourceInterest(void *target, void *, UInt32, IOService *, void *, vm_size_t)
++{
++	S0ixStandby *self = OSDynamicCast(S0ixStandby, static_cast<OSObject *>(target));
++	if (self && self->acTimer)
++		self->acTimer->setTimeoutMS(1);
++	return kIOReturnSuccess;
+ }
+ 
+ void S0ixStandby::acTimerFired(OSObject *owner, IOTimerEventSource *sender)
+ {
+ 	if (S0ixStandby *self = OSDynamicCast(S0ixStandby, owner)) {
+-		self->updateAC();
+-		sender->setTimeoutMS(10000);
++		if (self->acNoEcWake)
++			self->syncAcWakePolicy(true);
++		else
++			self->updateAC();
++		sender->setTimeoutMS(self->acNoEcWake ? 3000 : 10000);
+ 	}
+ }
+ 
+@@ -1308,6 +1513,8 @@ void S0ixStandby::battTimerFired(OSObject *owner, IOTimerEventSource *sender)
+ 			self->findEcGpe();
+ 			if (self->ecGpe != 0xFFFFFFFF) self->publishEcWake();
+ 		}
++		if (self->acNoEcWake && self->ecWakeDevCount == 0)
++			self->syncAcWakePolicy(true);
+ 		self->publishLog();
+ 		sender->setTimeoutMS(60000);
+ 	}
+@@ -1325,8 +1532,11 @@ void S0ixStandby::onSleep()
+ 	timeAtSleep = mach_absolute_time();
+ 	if (cstateMask) { readCStates(csAtSleep); tscAtSleep = rdtsc(); e2AtSleep = rdmsr(kMsrPkgCstConfig); }
+ 
+-	if (lastSleepType == kSleepTypeDeepIdle)
++	if (lastSleepType == kSleepTypeDeepIdle) {
+ 		d3Enter();
++		if (acNoEcWake)
++			syncAcWakePolicy(false);
++	}
+ 	if (gpuMMIO) {
+ 		gpuSleep();
+ 		dispCapture(dispAtSleep, nullptr);
+@@ -1475,6 +1685,8 @@ void S0ixStandby::publish()
+ 		setProperty("AC RTC wake blocks", (unsigned long long)rtcBlockCount, 32);
+ 		setProperty("On AC (last check)", onAC);
+ 	}
++	if (acNoEcWake)
++		syncAcWakePolicy(true);
+ 	publishWakeInfo();
+ 	setProperty("Last sleep type", (unsigned long long)snap.sleepType, 32);
+ 	setProperty("Last DSM entry/exit", snap.sleepType == kSleepTypeDeepIdle && dsmEnabled);
+diff --git a/S0ixStandby/S0ixStandby.hpp b/S0ixStandby/S0ixStandby.hpp
+index 06c299b..a8b1ea9 100644
+--- a/S0ixStandby/S0ixStandby.hpp
++++ b/S0ixStandby/S0ixStandby.hpp
+@@ -16,6 +16,7 @@
+ #include <IOKit/IOWorkLoop.h>
+ #include <IOKit/IOTimerEventSource.h>
+ #include <IOKit/IOMemoryDescriptor.h>
++#include <IOKit/IONotifier.h>
+ #include <IOKit/acpi/IOACPIPlatformDevice.h>
+ #include <IOKit/pci/IOPCIDevice.h>
+ 
+@@ -228,12 +229,32 @@ private:
+ 	bool setupWifiPM();
+ 
+ 	// -s0ixacnortc: no RTC alarm wakes from Deep Idle while on AC
+-	bool acNoRtc {false}, onAC {false}, rtcBlocked {false};
++	bool acNoRtc {false}, onAC {false}, psSeen {false}, rtcBlocked {false};
+ 	uint16_t pm1EnPort {0}, pm1EnSaved {0};
+ 	uint8_t cmosBSaved {0};
+ 	uint32_t rtcBlockCount {0};
+ 	IOTimerEventSource *acTimer {nullptr};
+ 
++	// -s0ixacnoecwake: disable ACPI wake capability on S0 wake devices whose
++	// acpi-wake-s0-gpe matches the EC GPE (e.g. PWRB with PRW0 = GPE 0x6e)
++	// while on AC, and re-enable on battery so power-button wake still works.
++	enum { kMaxEcWakeDevs = 4 };
++	bool acNoEcWake {false};
++	bool ecWakeAppliedValid {false}, ecWakeAppliedEnable {true};
++	IOLock *acWakeLock {nullptr};
++	IOACPIPlatformDevice *ecWakeDevs[kMaxEcWakeDevs] {};
++	uint32_t ecWakeDevCount {0};
++	IONotifier *psPublishNotifier {nullptr};
++	IONotifier *psInterestNotifier {nullptr};
++	void findEcWakeDevices();
++	void syncAcWakePolicy(bool updateRegistry);
++	void publishAcEcWake();
++	static bool powerSourcePublished(void *target, void *refCon,
++	                                 IOService *newService, IONotifier *notifier);
++	static IOReturn powerSourceInterest(void *target, void *refCon,
++	                                    UInt32 messageType, IOService *provider,
++	                                    void *messageArgument, vm_size_t argSize);
++
+ 	// Wake sources (read-only by default) and -s0ixecwake: keep the EC's
+ 	// GPE armed during Deep Idle so lid open (EC query) can wake.
+ 	bool ecWake {false}, ecArm {false}, ecArmed {false}, wakeInfoValid {false};

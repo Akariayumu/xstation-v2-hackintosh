@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic USB-EFI staging tool for X-STATION V2 S0ix Phase 0 & Phase 1.
+"""Deterministic USB-EFI staging tool for X-STATION V2 S0ix Phase 0, Phase 1 & Phase 4.
 
 Enforces the Zero-Brick Safety Contract from docs/research/s0ix-roadmap-20261115.md:
   - Never modifies the repository's baseline EFI/ in place.
@@ -14,6 +14,9 @@ Enforces the Zero-Brick Safety Contract from docs/research/s0ix-roadmap-20261115
     -wex-sink-rate-restore) alongside -wex-noaccel -s0ixdbg (since -wex-noaccel only
     disables AppleIntelTGLGraphics IntelAccelerator while AppleIntelTGLGraphicsFramebuffer
     still loads), and optionally binary-verifies all DSDT patches against a raw dsdt.dat dump.
+  - Phase 4: Enables full Metal 3D + DC9 + dual Battery/AC S0ix standby by adding
+    BAT0._BST -> XBST DSDT patch, SSDT-BATFULL.aml, patched S0ixStandby.kext (-s0ixacnoecwake),
+    ScanPolicy = 524547, and Timeout = 3.
 """
 
 from __future__ import annotations
@@ -40,6 +43,16 @@ PHASE1_BOOT_ARGS = (
     "alcid=19 alcapplid=19 -wex-tgl-sdt-guard -noDC9 -nodisplaysleepDC6 "
     "-wex-no-panel-keep -wex-sink-rate-restore -wex-noaccel -s0ixdbg"
 )
+
+PHASE4_BOOT_ARGS = (
+    "-v keepsyms=1 debug=0x100 -allow3d -disablegfxfirmware "
+    "alcid=19 alcapplid=19 -wex-tgl-sdt-guard -nodisplaysleepDC6 "
+    "-wex-no-panel-keep -wex-sink-rate-restore -s0ixdbg "
+    "-s0ixgpureset -s0ixrefclk -s0ixd3 -s0ixacnoecwake"
+)
+
+UNATTENDED_SCAN_POLICY = 524547  # OC_SCAN_FILE_SYSTEM_LOCK | OC_SCAN_DEVICE_LOCK | APFS | PCI NVMe
+UNATTENDED_TIMEOUT = 3
 
 S0IX_DSDT_PATCHES: tuple[dict[str, Any], ...] = (
     {
@@ -76,10 +89,35 @@ S0IX_DSDT_PATCHES: tuple[dict[str, Any], ...] = (
     },
 )
 
+BATFULL_DSDT_PATCH: dict[str, Any] = {
+    "Base": "",
+    "BaseSkip": 0,
+    "Comment": "Rename BAT0._BST to XBST for SSDT-BATFULL AC sleep fix",
+    "Count": 1,
+    "Enabled": True,
+    "Find": bytes.fromhex("14490A5F4253540008504B4731"),
+    "Limit": 0,
+    "Mask": b"",
+    "OemTableId": XSTATION_DSDT_OEM_TABLE_ID,
+    "Replace": bytes.fromhex("14490A584253540008504B4731"),
+    "ReplaceMask": b"",
+    "Skip": 0,
+    "TableLength": 0,
+    "TableSignature": DSDT_SIGNATURE,
+}
+
+PHASE4_DSDT_PATCHES: tuple[dict[str, Any], ...] = S0IX_DSDT_PATCHES + (BATFULL_DSDT_PATCH,)
+
 DEEPIDLE_ACPI_ENTRY: dict[str, Any] = {
-    "Comment": "X-STATION V2 S0ix Deep Idle (LPS0/LXEN) + Darwin PEPD._STA expose",
+    "Comment": "X-STATION V2 S0ix Deep Idle (LPS0/LXEN) + Darwin PEPD._STA + PWRB PRW0",
     "Enabled": True,
     "Path": "SSDT-DEEPIDLE.aml",
+}
+
+BATFULL_ACPI_ENTRY: dict[str, Any] = {
+    "Comment": "X-STATION V2 Battery Full >=94% Threshold Fix for S0ix AC Standby",
+    "Enabled": True,
+    "Path": "SSDT-BATFULL.aml",
 }
 
 S0IX_KEXT_ENTRY: dict[str, Any] = {
@@ -310,9 +348,9 @@ def transform_config_plist(
     wex_version: str | None = None,
     extra_boot_args: str | None = None,
 ) -> dict[str, Any]:
-    """Pure transformation of OpenCore config.plist dict for Phase 0 or Phase 1."""
-    if phase not in (0, 1):
-        raise ValueError(f"Unsupported phase: {phase} (expected 0 or 1)")
+    """Pure transformation of OpenCore config.plist dict for Phase 0, Phase 1, or Phase 4."""
+    if phase not in (0, 1, 4):
+        raise ValueError(f"Unsupported phase: {phase} (expected 0, 1, or 4)")
 
     cfg = copy.deepcopy(config)
 
@@ -338,25 +376,50 @@ def transform_config_plist(
     acpi = cfg.setdefault("ACPI", {})
     acpi_add: list[dict[str, Any]] = acpi.setdefault("Add", [])
     acpi_patch: list[dict[str, Any]] = acpi.setdefault("Patch", [])
-    s0ix_patch_keys = {(p["Find"], p["Replace"], p["TableSignature"]) for p in S0IX_DSDT_PATCHES}
+    all_s0ix_patch_keys = {(p["Find"], p["Replace"], p["TableSignature"]) for p in PHASE4_DSDT_PATCHES}
+    batfull_key = (
+        BATFULL_DSDT_PATCH["Find"],
+        BATFULL_DSDT_PATCH["Replace"],
+        BATFULL_DSDT_PATCH["TableSignature"],
+    )
 
     nvram_add_boot = nvram.setdefault("Add", {}).setdefault(APPLE_BOOT_GUID, {})
     baseline_boot_args = nvram_add_boot.get("boot-args", "")
 
     if phase == 0:
-        # Phase 0: Keep production boot-args, exclude SSDT-DEEPIDLE.aml, S0ix DSDT patches, and S0ixStandby.kext.
-        acpi["Add"] = [e for e in acpi_add if e.get("Path") != DEEPIDLE_ACPI_ENTRY["Path"]]
+        # Phase 0: Keep production boot-args, exclude SSDT-DEEPIDLE.aml, SSDT-BATFULL.aml, S0ix DSDT patches, and S0ixStandby.kext.
+        acpi["Add"] = [
+            e for e in acpi_add if e.get("Path") not in (DEEPIDLE_ACPI_ENTRY["Path"], BATFULL_ACPI_ENTRY["Path"])
+        ]
         acpi["Patch"] = [
             p
             for p in acpi_patch
-            if (p.get("Find"), p.get("Replace"), p.get("TableSignature")) not in s0ix_patch_keys
+            if (p.get("Find"), p.get("Replace"), p.get("TableSignature")) not in all_s0ix_patch_keys
         ]
         cfg["Kernel"]["Add"] = [k for k in kernel_add if k.get("BundlePath") != S0IX_KEXT_ENTRY["BundlePath"]]
         boot_args = baseline_boot_args
     else:
-        # Phase 1: Append the 2 DSDT binary patches, enable SSDT-DEEPIDLE.aml, enable S0ixStandby.kext,
-        # and retain all 5 Sharp 4K framebuffer guards alongside -wex-noaccel -s0ixdbg.
-        for target_patch in S0IX_DSDT_PATCHES:
+        if phase == 1:
+            acpi_add[:] = [e for e in acpi_add if e.get("Path") != BATFULL_ACPI_ENTRY["Path"]]
+            acpi_patch[:] = [
+                p
+                for p in acpi_patch
+                if (p.get("Find"), p.get("Replace"), p.get("TableSignature")) != batfull_key
+            ]
+            target_patches = S0IX_DSDT_PATCHES
+            target_acpi_entries = (DEEPIDLE_ACPI_ENTRY,)
+            boot_args = PHASE1_BOOT_ARGS
+        else:
+            target_patches = PHASE4_DSDT_PATCHES
+            target_acpi_entries = (DEEPIDLE_ACPI_ENTRY, BATFULL_ACPI_ENTRY)
+            boot_args = PHASE4_BOOT_ARGS
+            misc = cfg.setdefault("Misc", {})
+            misc.setdefault("Security", {})["ScanPolicy"] = UNATTENDED_SCAN_POLICY
+            boot_sec = misc.setdefault("Boot", {})
+            boot_sec["Timeout"] = UNATTENDED_TIMEOUT
+            boot_sec["ShowPicker"] = True
+
+        for target_patch in target_patches:
             key = (target_patch["Find"], target_patch["Replace"], target_patch["TableSignature"])
             existing = next(
                 (
@@ -372,15 +435,16 @@ def transform_config_plist(
             else:
                 acpi_patch.append(copy.deepcopy(target_patch))
 
-        existing_deepidle = next(
-            (e for e in acpi_add if e.get("Path") == DEEPIDLE_ACPI_ENTRY["Path"]),
-            None,
-        )
-        if existing_deepidle is not None:
-            existing_deepidle.clear()
-            existing_deepidle.update(copy.deepcopy(DEEPIDLE_ACPI_ENTRY))
-        else:
-            acpi_add.append(copy.deepcopy(DEEPIDLE_ACPI_ENTRY))
+        for target_entry in target_acpi_entries:
+            existing_acpi = next(
+                (e for e in acpi_add if e.get("Path") == target_entry["Path"]),
+                None,
+            )
+            if existing_acpi is not None:
+                existing_acpi.clear()
+                existing_acpi.update(copy.deepcopy(target_entry))
+            else:
+                acpi_add.append(copy.deepcopy(target_entry))
 
         existing_s0ix_kext = next(
             (k for k in kernel_add if k.get("BundlePath") == S0IX_KEXT_ENTRY["BundlePath"]),
@@ -391,8 +455,6 @@ def transform_config_plist(
             existing_s0ix_kext.update(copy.deepcopy(S0IX_KEXT_ENTRY))
         else:
             kernel_add.append(copy.deepcopy(S0IX_KEXT_ENTRY))
-
-        boot_args = PHASE1_BOOT_ARGS
 
     if extra_boot_args:
         extra = extra_boot_args.strip()
@@ -419,11 +481,11 @@ def stage_usb_efi(
     extra_boot_args: str | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    """Copy EFI/ into <out_dir>/EFI and deterministically stage Phase 0 or Phase 1 config/assets."""
-    if phase not in (0, 1):
-        raise ValueError(f"Unsupported phase: {phase} (expected 0 or 1)")
+    """Copy EFI/ into <out_dir>/EFI and deterministically stage Phase 0, Phase 1, or Phase 4 config/assets."""
+    if phase not in (0, 1, 4):
+        raise ValueError(f"Unsupported phase: {phase} (expected 0, 1, or 4)")
     if phase == 0 and s0ix_kext is not None:
-        raise ValueError("--s0ix-kext is only valid with --phase 1 (Phase 0 keeps SleepDisabled=1)")
+        raise ValueError("--s0ix-kext is only valid with --phase 1 or --phase 4 (Phase 0 keeps SleepDisabled=1)")
 
     root = (repo_root or default_repo_root()).resolve()
     src_efi = (efi_src or (root / "EFI")).resolve()
@@ -448,9 +510,11 @@ def stage_usb_efi(
     staged_kexts_dir.mkdir(parents=True, exist_ok=True)
 
     deepidle_aml = staged_acpi_dir / DEEPIDLE_ACPI_ENTRY["Path"]
+    batfull_aml = staged_acpi_dir / BATFULL_ACPI_ENTRY["Path"]
     if phase == 0:
-        if deepidle_aml.exists():
-            deepidle_aml.unlink()
+        for p_aml in (deepidle_aml, batfull_aml):
+            if p_aml.exists():
+                p_aml.unlink()
         staged_s0ix_dir = staged_kexts_dir / S0IX_KEXT_ENTRY["BundlePath"]
         if staged_s0ix_dir.exists():
             shutil.rmtree(staged_s0ix_dir)
@@ -461,8 +525,20 @@ def stage_usb_efi(
                 shutil.copy2(repo_deepidle, deepidle_aml)
             else:
                 raise FileNotFoundError(
-                    f"Phase 1 requires {DEEPIDLE_ACPI_ENTRY['Path']} in {staged_acpi_dir}"
+                    f"Phase {phase} requires {DEEPIDLE_ACPI_ENTRY['Path']} in {staged_acpi_dir}"
                 )
+        if phase == 1:
+            if batfull_aml.exists():
+                batfull_aml.unlink()
+        elif phase == 4:
+            if not batfull_aml.is_file():
+                repo_batfull = root / "EFI" / "OC" / "ACPI" / BATFULL_ACPI_ENTRY["Path"]
+                if repo_batfull.is_file():
+                    shutil.copy2(repo_batfull, batfull_aml)
+                else:
+                    raise FileNotFoundError(
+                        f"Phase 4 requires {BATFULL_ACPI_ENTRY['Path']} in {staged_acpi_dir}"
+                    )
 
     wex_info: dict[str, str] | None = None
     if wex_kext is not None:
@@ -497,7 +573,7 @@ def stage_usb_efi(
     if verify_dsdt is not None:
         patches_to_check = list(staged_cfg["ACPI"]["Patch"])
         if phase == 0:
-            patches_to_check.extend(copy.deepcopy(list(S0IX_DSDT_PATCHES)))
+            patches_to_check.extend(copy.deepcopy(list(PHASE4_DSDT_PATCHES)))
         dsdt_report = verify_dsdt_binary(verify_dsdt, patches_to_check)
 
     staged_config_path = out_efi / "OC" / "config.plist"
@@ -509,9 +585,9 @@ def stage_usb_efi(
         warnings.append(
             "OpenCore.efi not present in staged EFI (run `bash scripts/fetch-thirdparty.sh` before booting a physical USB)."
         )
-    if phase == 1 and not (staged_kexts_dir / "S0ixStandby.kext" / "Contents" / "MacOS" / "S0ixStandby").is_file():
+    if phase in (1, 4) and not (staged_kexts_dir / "S0ixStandby.kext" / "Contents" / "MacOS" / "S0ixStandby").is_file():
         warnings.append(
-            "S0ixStandby.kext binary is not yet copied into EFI/OC/Kexts/ (pass `--s0ix-kext <path>` before booting Phase 1)."
+            f"S0ixStandby.kext binary is not yet copied into EFI/OC/Kexts/ (pass `--s0ix-kext <path>` before booting Phase {phase})."
         )
 
     return {
@@ -530,14 +606,14 @@ def stage_usb_efi(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Deterministically stage X-STATION V2 S0ix Phase 0 / Phase 1 OpenCore USB EFI."
+        description="Deterministically stage X-STATION V2 S0ix Phase 0 / Phase 1 / Phase 4 OpenCore USB EFI."
     )
     parser.add_argument(
         "--phase",
         type=int,
-        choices=(0, 1),
+        choices=(0, 1, 4),
         required=True,
-        help="Target roadmap phase: 0 (WEX 0.8.2 + Graphics v0.4.4 baseline, SleepDisabled=1) or 1 (Deep Idle + PEPD + S0ixStandby + -wex-noaccel).",
+        help="Target roadmap phase: 0 (baseline SleepDisabled=1), 1 (Gate 1 Deep Idle + -wex-noaccel), or 4 (Metal 3D + DC9 + AC sleep SSDT-BATFULL + -s0ixacnoecwake).",
     )
     parser.add_argument(
         "--out",
@@ -561,7 +637,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--s0ix-kext",
         type=Path,
         default=None,
-        help="Optional path to S0ixStandby.kext directory or Release .zip (Phase 1 only).",
+        help="Optional path to S0ixStandby.kext directory or Release .zip (Phase 1 and Phase 4).",
     )
     parser.add_argument(
         "--verify-dsdt",

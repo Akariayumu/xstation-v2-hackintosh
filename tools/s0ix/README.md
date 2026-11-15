@@ -1,9 +1,13 @@
-# S0ix 实验 U 盘 EFI 确定性构建工具（Phase 0 / Phase 1）
+# S0ix 实验 U 盘 EFI 确定性构建工具（Phase 0 / Phase 1 / Phase 4）
 
 配套路线图：[`docs/research/s0ix-roadmap-20261115.md`](../../docs/research/s0ix-roadmap-20261115.md)  
-配套 ACPI 源码：[`acpi/SSDT-DEEPIDLE.dsl`](../../acpi/SSDT-DEEPIDLE.dsl) → `EFI/OC/ACPI/SSDT-DEEPIDLE.aml`
+配套 ACPI 源码：
+- [`acpi/SSDT-DEEPIDLE.dsl`](../../acpi/SSDT-DEEPIDLE.dsl) → `EFI/OC/ACPI/SSDT-DEEPIDLE.aml`
+- [`acpi/SSDT-BATFULL.dsl`](../../acpi/SSDT-BATFULL.dsl) → `EFI/OC/ACPI/SSDT-BATFULL.aml`
 
-`stage_usb_efi.py` 仅依赖 Python 3 标准库（`plistlib` / `pathlib` / `hashlib` / `zipfile`），用于把仓库基线 `EFI/` 安全克隆并转换为 **Phase 0** 或 **Phase 1** 救援/实验 U 盘 `EFI/`，全程**不修改仓库内的生产 `EFI/OC/config.plist`**。
+配套 Kext 补丁：[`patches/S0ixStandby/s0ixstandby-0.5.4-xstation-v1.patch`](../../patches/S0ixStandby/s0ixstandby-0.5.4-xstation-v1.patch)（新增 `-s0ixacnoecwake`，插电时禁用共享 EC `GPE 0x6E` 的 `PWRB` S0 唤醒能力，拔电自动恢复电池电源键唤醒）
+
+`stage_usb_efi.py` 仅依赖 Python 3 标准库（`plistlib` / `pathlib` / `hashlib` / `zipfile`），用于把仓库基线 `EFI/` 安全克隆并转换为 **Phase 0**、**Phase 1** 或 **Phase 4** 救援/实验 U 盘 `EFI/`，全程**不修改仓库内的生产 `EFI/OC/config.plist`**。
 
 ## 安全保障（Zero-Brick Safety Contract）
 
@@ -15,7 +19,7 @@
 ## 上游组件下载与 SHA-256 校验值
 
 > **注意**：
-> 1. 上游 `S0ixStandby` 发布页自带的 `SSDT-DEEPIDLE.aml`（`161` 字节）**不含**本机必需的 `\_SB.PEPD._STA` Darwin 暴露逻辑，请务必使用本仓库编译的 `EFI/OC/ACPI/SSDT-DEEPIDLE.aml`（`175` 字节，SHA-256 `47130b2c887514830aa7731b74be5560d14405ec57bc940988beebd3455b72b7`），`stage_usb_efi.py --phase 1` 会自动启用它。
+> 1. 上游 `S0ixStandby` 发布页自带的 `SSDT-DEEPIDLE.aml`（`161` 字节）**不含**本机必需的 `\_SB.PEPD._STA` Darwin 暴露逻辑与 `\_SB.PWRB.PRW0` (`GPE 0x6E`) 电源键唤醒声明，请务必使用本仓库编译的 `EFI/OC/ACPI/SSDT-DEEPIDLE.aml`（`264` 字节，SHA-256 `98a25497f51a065137146426b6995983db568e40eb2f034ed01878cd2cc5f801`），`stage_usb_efi.py --phase 1` 会自动启用它。
 > 2. 本机 Sharp 4K 面板（`SHP14A8`）必须使用打上 [`patches/WhateverXe/wex-0.8.2-xstation-v1.patch`](../../patches/WhateverXe/wex-0.8.2-xstation-v1.patch) 编译出的定制 `WhateverXe.kext`，切勿直接混用未打补丁的上游原版 `WhateverXe-0.8.2-RELEASE.zip`。
 
 | 组件 | 版本 | 文件名 | SHA-256 | 下载地址 |
@@ -65,6 +69,19 @@ python3 tools/s0ix/stage_usb_efi.py \
   --out /Volumes/USB_EFI \
   --wex-kext /path/to/build/Release/WhateverXe.kext \
   --s0ix-kext /path/to/S0ixStandby-0.5.4-v0.5.3-5-gc52f172-Release.zip \
+  --verify-dsdt /path/to/dsdt.dat \
+  --force
+```
+
+### 3. 生成 Phase 4 完整 S0ix U 盘 EFI（Metal 3D + DC9 + 插电/电池双模 S0ix）
+
+启用 `SSDT-DEEPIDLE.aml` + `SSDT-BATFULL.aml`、写入 `BAT0._BST -> XBST`（`dsdt.dat` 偏移 `0x073EA`）、注入打上 `s0ixstandby-0.5.4-xstation-v1.patch` 的 `S0ixStandby.kext`，并写入完整 `boot-args`（含 `-s0ixgpureset -s0ixrefclk -s0ixd3 -s0ixacnoecwake`）及 `ScanPolicy = 524547` / `Timeout = 3`：
+
+```bash
+python3 tools/s0ix/stage_usb_efi.py \
+  --phase 4 \
+  --out /Volumes/USB_EFI \
+  --wex-kext /path/to/build/Release/WhateverXe.kext \
   --verify-dsdt /path/to/dsdt.dat \
   --force
 ```

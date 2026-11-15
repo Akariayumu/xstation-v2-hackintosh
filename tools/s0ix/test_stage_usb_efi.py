@@ -77,6 +77,8 @@ def _make_synthetic_dsdt(
     body.extend(b"\x90" * 16)
     body.extend(bytes.fromhex("14275F53544100"))
     body.extend(b"\x90" * 16)
+    body.extend(bytes.fromhex("14490A5F4253540008504B4731"))
+    body.extend(b"\x90" * 16)
 
     total_len = 36 + len(body)
     header = bytearray(36)
@@ -254,7 +256,8 @@ class StageUsbEfiTests(unittest.TestCase):
         # Verify SSDT-DEEPIDLE.aml on disk and enabled in ACPI -> Add
         staged_aml = out_dir / "EFI" / "OC" / "ACPI" / "SSDT-DEEPIDLE.aml"
         self.assertTrue(staged_aml.is_file())
-        self.assertEqual(staged_aml.stat().st_size, 175)
+        self.assertEqual(staged_aml.stat().st_size, 264)
+        self.assertEqual(staged_aml.read_bytes(), (REPO_CONFIG.parent / "ACPI" / "SSDT-DEEPIDLE.aml").read_bytes())
         deepidle_entries = [e for e in cfg["ACPI"]["Add"] if e["Path"] == "SSDT-DEEPIDLE.aml"]
         self.assertEqual(len(deepidle_entries), 1)
         self.assertIs(deepidle_entries[0]["Enabled"], True)
@@ -338,6 +341,73 @@ class StageUsbEfiTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, msg=f"CLI failed:\n{proc.stdout}\n{proc.stderr}")
         self.assertIn("0x06055 (count=1): Disable _S3 for S0ix", proc.stdout)
         self.assertIn("0x3B58D (count=1): Expose PEPD under Darwin", proc.stdout)
+
+        cli_p4 = self.tmp / "cli_p4"
+        proc4 = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(THIS_DIR / "stage_usb_efi.py"),
+                "--phase",
+                "4",
+                "--out",
+                str(cli_p4),
+                "--verify-dsdt",
+                str(REAL_DSDT),
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(proc4.returncode, 0, msg=f"Phase 4 CLI failed:\n{proc4.stdout}\n{proc4.stderr}")
+        self.assertIn("0x06055 (count=1): Disable _S3 for S0ix", proc4.stdout)
+        self.assertIn("0x3B58D (count=1): Expose PEPD under Darwin", proc4.stdout)
+        self.assertIn("0x073EA (count=1): Rename BAT0._BST to XBST", proc4.stdout)
+
+    def test_phase4_ac_sleep_staging_and_idempotency(self) -> None:
+        dsdt_file = self.tmp / "synth_p4_dsdt.dat"
+        dsdt_file.write_bytes(_make_synthetic_dsdt())
+        out_dir = self.tmp / "p4_out"
+        res = mod.stage_usb_efi(phase=4, out_dir=out_dir, verify_dsdt=dsdt_file)
+
+        self.assertIs(res["write_flash"], False)
+        self.assertEqual(res["boot_args"], mod.PHASE4_BOOT_ARGS)
+        self.assertIsNotNone(res["dsdt_verification"])
+        self.assertEqual(len(res["dsdt_verification"]["matches"]), 6)
+
+        with (out_dir / "EFI" / "OC" / "config.plist").open("rb") as f:
+            cfg = plistlib.load(f)
+
+        self.assertIs(cfg["NVRAM"]["WriteFlash"], False)
+        tokens = set(cfg["NVRAM"]["Add"][mod.APPLE_BOOT_GUID]["boot-args"].split())
+        for flag in ("-s0ixdbg", "-s0ixgpureset", "-s0ixrefclk", "-s0ixd3", "-s0ixacnoecwake"):
+            self.assertIn(flag, tokens)
+        for excluded in ("-noDC9", "-wex-noaccel", "-s0ixacnortc"):
+            self.assertNotIn(excluded, tokens)
+
+        self.assertEqual(cfg["Misc"]["Security"]["ScanPolicy"], 524547)
+        self.assertEqual(cfg["Misc"]["Boot"]["Timeout"], 3)
+        self.assertIs(cfg["Misc"]["Boot"]["ShowPicker"], True)
+
+        staged_batfull = out_dir / "EFI" / "OC" / "ACPI" / "SSDT-BATFULL.aml"
+        self.assertTrue(staged_batfull.is_file())
+        self.assertEqual(staged_batfull.read_bytes(), (REPO_CONFIG.parent / "ACPI" / "SSDT-BATFULL.aml").read_bytes())
+        batfull_entries = [e for e in cfg["ACPI"]["Add"] if e["Path"] == "SSDT-BATFULL.aml"]
+        self.assertEqual(len(batfull_entries), 1)
+        self.assertIs(batfull_entries[0]["Enabled"], True)
+
+        bat_patches = [p for p in cfg["ACPI"]["Patch"] if p["Find"] == bytes.fromhex("14490A5F4253540008504B4731")]
+        self.assertEqual(len(bat_patches), 1)
+        self.assertEqual(bat_patches[0]["Replace"], bytes.fromhex("14490A584253540008504B4731"))
+        self.assertEqual(bat_patches[0]["Count"], 1)
+        self.assertIs(bat_patches[0]["Enabled"], True)
+
+        staged_s0ix_bin = out_dir / "EFI" / "OC" / "Kexts" / "S0ixStandby.kext" / "Contents" / "MacOS" / "S0ixStandby"
+        self.assertTrue(staged_s0ix_bin.is_file())
+
+        cfg_again = mod.transform_config_plist(cfg, phase=4)
+        self.assertEqual(cfg, cfg_again)
 
 
 if __name__ == "__main__":
