@@ -412,6 +412,53 @@ class StageUsbEfiTests(unittest.TestCase):
         cfg_again = mod.transform_config_plist(cfg, phase=4)
         self.assertEqual(cfg, cfg_again)
 
+    def test_smcprocessor_enabled_after_virtualsmc(self) -> None:
+        for phase in (0, 1, 4):
+            out_dir = self.tmp / f"smcp_p{phase}"
+            mod.stage_usb_efi(phase=phase, out_dir=out_dir)
+            with (out_dir / "EFI" / "OC" / "config.plist").open("rb") as f:
+                cfg = plistlib.load(f)
+
+            kernel_add = cfg["Kernel"]["Add"]
+            bundle_paths = [k["BundlePath"] for k in kernel_add]
+            self.assertIn("VirtualSMC.kext", bundle_paths)
+            self.assertIn("SMCProcessor.kext", bundle_paths)
+
+            vsmc_idx = bundle_paths.index("VirtualSMC.kext")
+            smcp_idx = bundle_paths.index("SMCProcessor.kext")
+            self.assertEqual(
+                smcp_idx,
+                vsmc_idx + 1,
+                f"Phase {phase}: SMCProcessor.kext must immediately follow VirtualSMC.kext",
+            )
+            smcp_entry = kernel_add[smcp_idx]
+            self.assertIs(smcp_entry["Enabled"], True)
+            self.assertEqual(smcp_entry["ExecutablePath"], "Contents/MacOS/SMCProcessor")
+            self.assertEqual(smcp_entry["PlistPath"], "Contents/Info.plist")
+
+            staged_smcp_bin = (
+                out_dir / "EFI" / "OC" / "Kexts" / "SMCProcessor.kext" / "Contents" / "MacOS" / "SMCProcessor"
+            )
+            if (out_dir / "EFI" / "OC" / "OpenCore.efi").is_file():
+                self.assertTrue(staged_smcp_bin.is_file())
+                self.assertTrue(bool(staged_smcp_bin.stat().st_mode & stat.S_IXUSR))
+
+        # Legacy v2.0 config without SMCProcessor.kext gets it inserted right after VirtualSMC.kext
+        legacy_cfg = {
+            "Kernel": {
+                "Add": [
+                    {"BundlePath": "Lilu.kext", "Enabled": True, "MinKernel": "8.0.0", "MaxKernel": ""},
+                    {"BundlePath": "VirtualSMC.kext", "Enabled": True, "MinKernel": "8.0.0", "MaxKernel": ""},
+                    {"BundlePath": "SMCBatteryManager.kext", "Enabled": True, "MinKernel": "24.0.0", "MaxKernel": "24.99.99"},
+                ]
+            }
+        }
+        upgraded = mod.transform_config_plist(legacy_cfg, phase=4)
+        up_paths = [k["BundlePath"] for k in upgraded["Kernel"]["Add"]]
+        self.assertEqual(up_paths[:3], ["Lilu.kext", "VirtualSMC.kext", "SMCProcessor.kext"])
+        self.assertIs(upgraded["Kernel"]["Add"][2]["Enabled"], True)
+        self.assertEqual(upgraded, mod.transform_config_plist(upgraded, phase=4))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,8 +1,8 @@
 # S0ixStandby 补丁（X-STATION V2）
 
-本目录维护针对上游 [labrouss/S0ixStandby](https://github.com/labrouss/S0ixStandby) **v0.5.4**（commit `28069d3` / release `c52f172`）的 X-STATION V2 定制补丁 `s0ixstandby-0.5.4-xstation-v1.patch`，用于构建 `EFI/OC/Kexts/S0ixStandby.kext`。
+本目录维护针对上游 [labrouss/S0ixStandby](https://github.com/labrouss/S0ixStandby) **v0.5.4**（commit `28069d3` / release `c52f172`）的 X-STATION V2 定制补丁 `s0ixstandby-0.5.4-xstation-v2.patch`（向下包含 `v1` 补丁），用于构建 `EFI/OC/Kexts/S0ixStandby.kext`。
 
-## 为什么需要 `-s0ixacnoecwake`
+## 1. 为什么需要 `-s0ixacnoecwake`（`v1`）
 
 X-STATION V2 的嵌入式控制器 `H_EC` 与 ACPI 电源键 `\_SB.PWRB` 共用同一根 `GPE0_STS[110]`（`GPE 0x6E`）：
 
@@ -11,6 +11,16 @@ X-STATION V2 的嵌入式控制器 `H_EC` 与 ACPI 电源键 `\_SB.PWRB` 共用�
 - 逆向 `AppleACPIPlatformExpert::sleepPlatform()` / `updateWakeDevices()` 可知，macOS 只对位于内部 `fWakeDevices` 集合中的设备打开 `"acpi-wake-s0-gpe"`（`0x6E`），唤醒后调用 `_AcpiHwEnableAllRuntimeGpes()` 自动恢复全部运行态 GPE（因此日常亮屏下的电池/电源键查询不受影响）。
 
 `s0ixstandby-0.5.4-xstation-v1.patch` 新增 `-s0ixacnoecwake`：监听 `IOPMPowerSource` 的 `ExternalConnected` 状态，插电时通过公开 KPI `IOACPIPlatformDevice::setSystemWakeCapabilityEnable(false)` 将 `PWRB` 移出 `fWakeDevices`（屏蔽充电态 `GPE 0x6E` S0 唤醒，保留 USB 键鼠与定时 RTC 唤醒）；拔掉电源切回电池时自动调用 `setSystemWakeCapabilityEnable(true)` 恢复实体电源键唤醒。全程不写任何 EC RAM。
+
+## 2. 按需只读导出 Gen12 核显实时频率（`v2`）
+
+在 Tiger Lake（Gen12 `Iris Xe`）上，macOS 用户态 `PerformanceStatistics` 与 `powermetrics` 均不导出核显实时频率。`s0ixstandby-0.5.4-xstation-v2.patch` 在保留 `v1` 全部行为的基础上，新增零轮询、零 Forcewake、纯只读的按需查询入口：
+
+- 在 `setupGPU()` 成功映射 Gen12 `gpuMMIO` 时初始化 IORegistry 属性 `"GPU Current Freq MHz" = 0` 与 `"GPU Requested Freq MHz" = 0`（`uint32` `OSNumber`），供用户态监控工具被动探测能力。
+- 重写 `S0ixStandby::setProperties(OSObject *properties)`：当用户态调用 `IORegistryEntrySetCFProperties(..., {"refreshGpuFreq": kCFBooleanTrue})`（免 `root`）时，在 `gpuFreqLock` 互斥保护与睡眠态守卫下：
+  1. 只读检查 PCI `PMCSR`（处于 `D0`）与 `kIOPCICommandMemorySpace`（已使能），**绝不改写 PCI Command 寄存器**；
+  2. 只读检查 `FORCEWAKE_RENDER_ACK`（`0x00D84`）：若 `(ack & 0xFFFF) == 0`（核显处于 `RC6` 休眠）或 `ack == 0xFFFFFFFF`，直接发布 `0 MHz`，**绝不触发任何 Forcewake 写入**；
+  3. 仅在核显处于活跃态时只读采样 `GEN12_RPSTAT1`（`0x1381B4`，`cagf = (v >> 11) & 0x1FF`，`actualMHz = (cagf * 50 + 1) / 3`）与 `GEN6_RPNSWREQ`（`0x0A008`，`req = (v >> 23) & 0x1FF`，`reqMHz = (req * 50 + 1) / 3`），更新 `"GPU Current Freq MHz"` 与 `"GPU Requested Freq MHz"`。
 
 ## 常用启动参数
 

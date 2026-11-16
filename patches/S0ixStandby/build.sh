@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Reproducible macOS Release build script for S0ixStandby 0.5.4 + X-STATION V2 patch (-s0ixacnoecwake)
+# Reproducible macOS Release build script for S0ixStandby 0.5.4 + X-STATION V2 v2 patch
+# (-s0ixacnoecwake + read-only Gen12 GPU MHz export via setProperties)
 #
 # Usage (on macOS with Xcode Command Line Tools installed):
 #   ./build.sh <path-to-S0ixStandby-0.5.4-src> [path-to-MacKernelSDK]
@@ -12,7 +13,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PATCH_FILE="${SCRIPT_DIR}/s0ixstandby-0.5.4-xstation-v1.patch"
+PATCH_FILE="${SCRIPT_DIR}/s0ixstandby-0.5.4-xstation-v2.patch"
 
 if [[ $# -lt 1 ]]; then
     echo "Usage: $0 <S0ixStandby-src-dir> [MacKernelSDK-dir]" >&2
@@ -32,11 +33,14 @@ if [[ ! -d "${SDK_DIR}/Headers" || ! -f "${SDK_DIR}/Library/x86_64/libkmod.a" ]]
     exit 1
 fi
 
-if ! grep -q -- "-s0ixacnoecwake" "${SRC_DIR}/S0ixStandby/S0ixStandby.cpp"; then
+if grep -q -- "refreshGpuFreq" "${SRC_DIR}/S0ixStandby/S0ixStandby.cpp"; then
+    echo "[1/3] Patch already applied."
+elif grep -q -- "-s0ixacnoecwake" "${SRC_DIR}/S0ixStandby/S0ixStandby.cpp"; then
+    echo "Error: ${SRC_DIR} has v1 patch applied; reset to clean 28069d3 before applying $(basename "${PATCH_FILE}")" >&2
+    exit 1
+else
     echo "[1/3] Applying $(basename "${PATCH_FILE}")..."
     patch -d "${SRC_DIR}" -p1 < "${PATCH_FILE}"
-else
-    echo "[1/3] Patch already applied."
 fi
 
 echo "[2/3] Building Release S0ixStandby.kext..."
