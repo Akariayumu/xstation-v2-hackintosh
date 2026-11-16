@@ -38,6 +38,12 @@ APPLE_BOOT_GUID = "7C436110-AB2A-4BBB-A880-FE41995C9F82"
 DSDT_SIGNATURE = b"DSDT"
 XSTATION_DSDT_OEM_TABLE_ID = bytes.fromhex("41204D2049200000")  # "A M I \x00\x00" (QSBNIEkgAAA=)
 
+PHASE0_BOOT_ARGS = (
+    "-v keepsyms=1 debug=0x100 -allow3d -disablegfxfirmware "
+    "alcid=19 alcapplid=19 -wex-tgl-sdt-guard -noDC9 -nodisplaysleepDC6 "
+    "-wex-no-panel-keep -wex-sink-rate-restore"
+)
+
 PHASE1_BOOT_ARGS = (
     "-v keepsyms=1 debug=0x100 -allow3d -disablegfxfirmware "
     "alcid=19 alcapplid=19 -wex-tgl-sdt-guard -noDC9 -nodisplaysleepDC6 "
@@ -384,10 +390,10 @@ def transform_config_plist(
     )
 
     nvram_add_boot = nvram.setdefault("Add", {}).setdefault(APPLE_BOOT_GUID, {})
-    baseline_boot_args = nvram_add_boot.get("boot-args", "")
 
     if phase == 0:
-        # Phase 0: Keep production boot-args, exclude SSDT-DEEPIDLE.aml, SSDT-BATFULL.aml, S0ix DSDT patches, and S0ixStandby.kext.
+        # Phase 0: Restore pre-S0ix (-noDC9 / SleepDisabled=1) boot-args, exclude SSDT-DEEPIDLE.aml,
+        # SSDT-BATFULL.aml, S0ix DSDT patches, and S0ixStandby.kext.
         acpi["Add"] = [
             e for e in acpi_add if e.get("Path") not in (DEEPIDLE_ACPI_ENTRY["Path"], BATFULL_ACPI_ENTRY["Path"])
         ]
@@ -397,7 +403,7 @@ def transform_config_plist(
             if (p.get("Find"), p.get("Replace"), p.get("TableSignature")) not in all_s0ix_patch_keys
         ]
         cfg["Kernel"]["Add"] = [k for k in kernel_add if k.get("BundlePath") != S0IX_KEXT_ENTRY["BundlePath"]]
-        boot_args = baseline_boot_args
+        boot_args = PHASE0_BOOT_ARGS
     else:
         if phase == 1:
             acpi_add[:] = [e for e in acpi_add if e.get("Path") != BATFULL_ACPI_ENTRY["Path"]]

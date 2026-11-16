@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 从各上游发布页下载第三方组件，按 thirdparty.lock 取出文件放进 EFI，并按 EFI-sha256.txt 校验整个 EFI。
-# 结果与作者实机使用的 v0.1.55 逐字节一致（config.plist 除外，它的 SMBIOS 需要你自己填）。
+# 结果与作者实机使用的 v2.0 逐字节一致（config.plist 除外，它的 SMBIOS 需要你自己填）。
 # 依赖：bash、curl、unzip、sha256sum 或 shasum。Linux 和 macOS 都可以运行。
 # 用法：scripts/fetch-thirdparty.sh            下载缓存在 .cache/thirdparty/
 set -euo pipefail

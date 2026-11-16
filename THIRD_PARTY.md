@@ -1,11 +1,11 @@
 # 第三方组件
 
-版本对应 EFI v0.1.55（2026-10-29 实机验证）。许可证以各上游仓库为准，下表为 2026-10-29 查询结果。
-每个发布包的下载地址和 SHA-256 见 [thirdparty.lock](thirdparty.lock)。
+版本对应 **EFI v2.0**（2026-11-16 实机验证；旧版 `v0.1.55` 归档在 `v1` 分支）。许可证以各上游仓库为准。
+由脚本拉取的每个发布包的下载地址和 SHA-256 见 [thirdparty.lock](thirdparty.lock)。
 
 ## 由脚本下载（本仓库不包含）
 
-运行 `scripts/fetch-thirdparty.sh` 获取。
+运行 `scripts/fetch-thirdparty.sh` 获取（共 14 个上游发布包、取出 44 个文件）。
 
 | 组件 | 版本 | 上游 | 许可证 |
 |---|---|---|---|
@@ -29,22 +29,23 @@
 
 | 文件 | 来源 | 许可证 | 说明 |
 |---|---|---|---|
-| `EFI/OC/Kexts/WhateverXe.kext` | [b00t0x/WhateverXe](https://github.com/b00t0x/WhateverXe) 0.5.0（commit `c6cd8ec`）+ `patches/WhateverXe/candidate-11.patch` | BSD-3-Clause（源自 WhateverGreen，© vit9696） | 补丁、构建方法和上游许可证全文在 `patches/WhateverXe/` |
+| `EFI/OC/Kexts/WhateverXe.kext` | [b00t0x/WhateverXe](https://github.com/b00t0x/WhateverXe) 0.8.2（tag `0.8.2`，commit `4512191b`）+ `patches/WhateverXe/wex-0.8.2-xstation-v1.patch` | BSD-3-Clause（源自 WhateverGreen，© vit9696） | 补丁、构建脚本 `build-0.8.2.sh` 和上游许可证全文在 `patches/WhateverXe/` |
+| `EFI/OC/Kexts/S0ixStandby.kext` | [labrouss/S0ixStandby](https://github.com/labrouss/S0ixStandby) 0.5.4（commit `28069d3`）+ `patches/S0ixStandby/s0ixstandby-0.5.4-xstation-v1.patch` | BSD-3-Clause（© 2026 The S0ixStandby Authors） | 新增 `-s0ixacnoecwake`（插电屏蔽共享 `GPE 0x6E` S0 唤醒，拔电自动恢复电源键唤醒）；补丁、构建脚本 `build.sh` 和上游许可证全文在 `patches/S0ixStandby/` |
 | `EFI/OC/Kexts/VoodooI2C.kext/Contents/PlugIns/VoodooGPIO.kext` | VoodooI2C 上游 CI 构建（VoodooI2C commit [`6be653a`](https://github.com/VoodooI2C/VoodooI2C/commit/6be653a2d2234ac1f7464ebf12716314975c3920)，VoodooGPIO 子模块 commit [`d415406`](https://github.com/VoodooI2C/VoodooGPIO/commit/d415406ecf25b5e322d3db9a4abab5719106fac1)），未修改 | GPL-3.0，全文见 `licenses/VoodooGPIO-GPL-3.0.txt` | 2.9.1 正式版的 VoodooGPIO 不认 Tiger Lake LP（`INT34C5`），这个提交加入了 `VoodooGPIOTigerLakeLP`。对应源码即上述公开提交 |
 | `EFI/OC/Kexts/VoodooI2C.kext/Contents/Info.plist` | VoodooI2C 2.9.1 | GPL-3.0 | 唯一改动：`VoodooI2CPCILakeController` 的 `IOPCIMatch` 加入 `0xa0e88086&0xFFFCFFFF`（本机 I²C 控制器） |
 | `EFI/OC/Kexts/AppleALC.kext/Contents/Info.plist` | AppleALC 1.9.8 | BSD-3-Clause | 唯一改动：ALC256 layout 19 的 `ConfigData` 和 `WakeConfigData` 末尾追加 `02050010 02040020`（coef `0x10` 写 `0x0020`，清除扬声器静音位） |
 
 ## 系统内安装的组件（不在 EFI 里，本仓库不分发）
 
-| 组件 | 上游 | 许可证 |
-|---|---|---|
-| WhateverXe Graphics（Apple 图形驱动、编译器组件，经修改） | [b00t0x/WhateverXe-Graphics](https://github.com/b00t0x/WhateverXe-Graphics) | 打包工具 BSD-2-Clause；**驱动本体为 Apple / Intel 二进制，不授予再分发权利** |
-| AppleIntelTGLCompat | 源码在 [b00t0x/WhateverXe](https://github.com/b00t0x/WhateverXe/tree/main/AppleIntelTGLCompat)，二进制随 WhateverXe Graphics 发布 | BSD-2-Clause |
+| 组件 | 版本 | 上游 | 许可证 |
+|---|---|---|---|
+| WhateverXe Graphics（Apple 图形驱动、编译器组件，经修改） | 0.4.4 | [b00t0x/WhateverXe-Graphics](https://github.com/b00t0x/WhateverXe-Graphics) | 打包工具 BSD-2-Clause；**驱动本体为 Apple / Intel 二进制，不授予再分发权利** |
+| AppleIntelTGLCompat | 随 0.4.4 发布 | 源码在 [b00t0x/WhateverXe](https://github.com/b00t0x/WhateverXe/tree/main/AppleIntelTGLCompat)，二进制随 WhateverXe Graphics 发布 | BSD-2-Clause |
 
 ## 本仓库自己的部分（BSD-3-Clause）
 
-- `EFI/OC/ACPI/`、`acpi/` 中的 SSDT：PWRBEC、HIDDSTA、PNLF、PLUG、EC、RTCAWAC
-- `EFI/OC/Kexts/UTBMap.kext`（只有 Info.plist 的 USB 映射）
+- `EFI/OC/ACPI/`、`acpi/` 中的 8 张 SSDT：`SSDT-RTCAWAC`、`SSDT-PLUG`、`SSDT-EC`、`SSDT-PNLF`、`SSDT-PWRBEC`、`SSDT-HIDDSTA-v2`、`SSDT-DEEPIDLE`、`SSDT-BATFULL`
+- `EFI/OC/Kexts/UTBMap.kext`（只有 Info.plist 的实测 USB 映射）
 - `EFI/OC/Kexts/XSHIDDLog.kext` 及其源码 `src/XSHIDDLog/`
-- `patches/WhateverXe/` 中的补丁（原文件的版权声明保留）
-- `scripts/`、`tools/`、`docs/`、`CHANGELOG.md`
+- `patches/WhateverXe/` 与 `patches/S0ixStandby/` 中的补丁与构建脚本（原文件的版权声明保留）
+- `scripts/`、`tools/`（含 `tools/s0ix/` 确定性 U 盘 EFI 构建与 DSDT 二进制校验工具）、`docs/`、`CHANGELOG.md`

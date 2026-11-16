@@ -64,11 +64,12 @@ def _make_synthetic_dsdt(
     include_baseline_patches: bool = True,
 ) -> bytes:
     body = bytearray(b"\x00" * 64)
+    s0ix_finds = {p["Find"] for p in mod.PHASE4_DSDT_PATCHES}
     if include_baseline_patches:
         with REPO_CONFIG.open("rb") as f:
             cfg = plistlib.load(f)
         for p in cfg["ACPI"]["Patch"]:
-            if p.get("Enabled"):
+            if p.get("Enabled") and p.get("Find") not in s0ix_finds:
                 body.extend(p["Find"])
                 body.extend(b"\x90" * 16)
     body.extend(bytes.fromhex("085F53335F1207040A05000000"))
@@ -150,31 +151,37 @@ class StageUsbEfiTests(unittest.TestCase):
         self.assertIs(cfg["NVRAM"]["WriteFlash"], False)
         self.assertIn("boot-args", cfg["NVRAM"]["Delete"][mod.APPLE_BOOT_GUID])
 
-        # Production boot-args kept intact in Phase 0
-        orig_boot_args = orig_cfg["NVRAM"]["Add"][mod.APPLE_BOOT_GUID]["boot-args"]
-        self.assertEqual(cfg["NVRAM"]["Add"][mod.APPLE_BOOT_GUID]["boot-args"], orig_boot_args)
+        # Pre-S0ix (-noDC9 / SleepDisabled=1) boot-args restored in Phase 0
+        self.assertEqual(cfg["NVRAM"]["Add"][mod.APPLE_BOOT_GUID]["boot-args"], mod.PHASE0_BOOT_ARGS)
         self.assertIn("-noDC9", cfg["NVRAM"]["Add"][mod.APPLE_BOOT_GUID]["boot-args"])
         self.assertNotIn("-wex-noaccel", cfg["NVRAM"]["Add"][mod.APPLE_BOOT_GUID]["boot-args"])
 
-        # All 24.6.0 locks widened to 24.0.0 .. 24.99.99; non-24.6.0 entries preserved
-        widened_count = 0
-        for orig_k, new_k in zip(orig_cfg["Kernel"]["Add"], cfg["Kernel"]["Add"]):
+        # No 24.6.0-locked entries remain; also verify transform_config_plist widens synthetic 24.6.0 locks
+        orig_non_s0ix_kexts = [k for k in orig_cfg["Kernel"]["Add"] if k["BundlePath"] != "S0ixStandby.kext"]
+        for orig_k, new_k in zip(orig_non_s0ix_kexts, cfg["Kernel"]["Add"]):
             if orig_k["MinKernel"] == "24.6.0":
                 self.assertEqual(new_k["MinKernel"], "24.0.0")
-                widened_count += 1
             else:
                 self.assertEqual(new_k["MinKernel"], orig_k["MinKernel"])
             if orig_k["MaxKernel"] == "24.6.0":
                 self.assertEqual(new_k["MaxKernel"], "24.99.99")
             else:
                 self.assertEqual(new_k["MaxKernel"], orig_k["MaxKernel"])
-        self.assertEqual(widened_count, 14)
+            self.assertNotEqual(new_k["MinKernel"], "24.6.0")
+            self.assertNotEqual(new_k["MaxKernel"], "24.6.0")
 
-        # Phase 0 excludes SSDT-DEEPIDLE.aml, S0ix DSDT patches, and S0ixStandby.kext
+        synth_locked = {"Kernel": {"Add": [{"BundlePath": "AppleALC.kext", "MinKernel": "24.6.0", "MaxKernel": "24.6.0"}]}}
+        widened_synth = mod.transform_config_plist(synth_locked, phase=0)
+        self.assertEqual(widened_synth["Kernel"]["Add"][0]["MinKernel"], "24.0.0")
+        self.assertEqual(widened_synth["Kernel"]["Add"][0]["MaxKernel"], "24.99.99")
+
+        # Phase 0 excludes SSDT-DEEPIDLE.aml, SSDT-BATFULL.aml, S0ix DSDT patches, and S0ixStandby.kext
         acpi_paths = [e["Path"] for e in cfg["ACPI"]["Add"]]
         self.assertNotIn("SSDT-DEEPIDLE.aml", acpi_paths)
+        self.assertNotIn("SSDT-BATFULL.aml", acpi_paths)
         self.assertFalse((out_a / "EFI" / "OC" / "ACPI" / "SSDT-DEEPIDLE.aml").exists())
-        self.assertEqual(len(cfg["ACPI"]["Patch"]), len(orig_cfg["ACPI"]["Patch"]))
+        self.assertFalse((out_a / "EFI" / "OC" / "ACPI" / "SSDT-BATFULL.aml").exists())
+        self.assertEqual(len(cfg["ACPI"]["Patch"]), 3)
         bundle_paths = [k["BundlePath"] for k in cfg["Kernel"]["Add"]]
         self.assertNotIn("S0ixStandby.kext", bundle_paths)
 
@@ -229,10 +236,6 @@ class StageUsbEfiTests(unittest.TestCase):
         self.assertIsNotNone(res["dsdt_verification"])
         self.assertEqual(len(res["dsdt_verification"]["matches"]), 5)
 
-        with REPO_CONFIG.open("rb") as f:
-            orig_cfg = plistlib.load(f)
-        orig_boot_args = orig_cfg["NVRAM"]["Add"][mod.APPLE_BOOT_GUID]["boot-args"]
-
         with (out_dir / "EFI" / "OC" / "config.plist").open("rb") as f:
             cfg = plistlib.load(f)
 
@@ -240,7 +243,7 @@ class StageUsbEfiTests(unittest.TestCase):
         self.assertIs(cfg["NVRAM"]["WriteFlash"], False)
         staged_boot_args = cfg["NVRAM"]["Add"][mod.APPLE_BOOT_GUID]["boot-args"]
         self.assertEqual(staged_boot_args, mod.PHASE1_BOOT_ARGS)
-        self.assertEqual(staged_boot_args, f"{orig_boot_args} -wex-noaccel -s0ixdbg")
+        self.assertEqual(staged_boot_args, f"{mod.PHASE0_BOOT_ARGS} -wex-noaccel -s0ixdbg")
         boot_arg_tokens = set(staged_boot_args.split())
         for required_flag in (
             "-wex-tgl-sdt-guard",
