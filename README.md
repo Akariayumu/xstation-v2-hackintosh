@@ -20,7 +20,7 @@ i7-1165G7 / Iris Xe 二合一平板电脑上的 macOS Sequoia OpenCore EFI、ACP
 | 硬盘 | Kingston OM8PDP31024B-A01 1 TB PCIe x4 NVMe |
 | 无线 | Intel AX201（Wi-Fi 6 + 蓝牙） |
 | 音频 | Realtek ALC256 |
-| 接口 | 2 × 雷电 4（按 USB-C 使用）、1 × USB 3.2 Type-C |
+| 接口 | 2 × 雷电 4（按 USB-C + DP Alt Mode 使用）、1 × USB 3.2 Type-C |
 
 详细的 PCI / ACPI / USB 身份见 [docs/hardware.md](docs/hardware.md)。
 
@@ -30,6 +30,7 @@ i7-1165G7 / Iris Xe 二合一平板电脑上的 macOS Sequoia OpenCore EFI、ACP
 |---|---|---|---|
 | 核显加速 | ✅ | Metal（WhateverXe 0.8.2 + Graphics 0.4.4），3840×2400 面板按 2560×1600 HiDPI | B′ 基线 / v2.0 |
 | 背光 / 关屏点亮 | ✅ | SSDT-PNLF + 核显真 `DC9` 断电冷唤醒（已移除 `-noDC9`） | v0.1.42 / v2.0 |
+| 外接显示器 | ✅ | USB-C DP Alt Mode 视频输出正常（进入 S0ix 睡眠前建议先拔除外接屏） | v2.0.1 |
 | 系统睡眠 | ✅ | S0ix 现代待机 Deep Idle（`CC7`/`PC8` 99% + 核显 `DC9`），电池支持电源键唤醒，插电支持整晚待机 | v2.0 |
 | 触摸屏 | ✅ | VoodooI2C 2.9.1，10 点，GPIO 中断 | v0.1.41 / v0.1.52 |
 | 手写笔 | ✅ | 悬停、笔尖、侧键、橡皮擦；应用内压感未验证 | v0.1.51 |
@@ -44,9 +45,8 @@ i7-1165G7 / Iris Xe 二合一平板电脑上的 macOS Sequoia OpenCore EFI、ACP
 | USB | ✅ | 实测定制映射（UTBMap） | v0.1.55 |
 | 摄像头 ×2 | 🟡 | QuickTime 可用；Photo Booth 预览崩溃 | — |
 | 读卡器 | ⬜ | 已识别，未插卡测试 | — |
-| 雷电 | ❌ | 集成雷电（NHI）在 macOS 无驱动，接口只按 USB 使用 | — |
+| 雷电 | ❌ | 集成雷电（NHI PCIe 隧道）在 macOS 无驱动，接口按 USB-C + DP Alt Mode 使用 | — |
 | 指纹 | ❌ | 无法适配 | — |
-| 外接显示器 | ⬜ | 未测 | — |
 
 ## 性能基准（v2.0，连续 9 次 S0ix 睡眠唤醒后实测）
 
