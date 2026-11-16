@@ -1,0 +1,42 @@
+# S0ixStandby 补丁（X-STATION V2）
+
+本目录维护针对上游 [labrouss/S0ixStandby](https://github.com/labrouss/S0ixStandby) **v0.5.4**（commit `28069d3` / release `c52f172`）的 X-STATION V2 定制补丁 `s0ixstandby-0.5.4-xstation-v1.patch`，用于构建 `EFI/OC/Kexts/S0ixStandby.kext`。
+
+## 为什么需要 `-s0ixacnoecwake`
+
+X-STATION V2 的嵌入式控制器 `H_EC` 与 ACPI 电源键 `\_SB.PWRB` 共用同一根 `GPE0_STS[110]`（`GPE 0x6E`）：
+
+- 在 `SSDT-DEEPIDLE.dsl` 中为 `\_SB.PWRB` 补齐 `PRW0 = Package (2) { 0x6E, 0x04 }` 后，**纯电池模式**下短按实体电源键可以正常唤醒 S0ix Deep Idle。
+- 但在**插电（AC）充电模式**下，`H_EC` 在充电电流变化或电池状态刷新时同样会拉高 `GPE 0x6E` 触发 SCI 查询，若 `GPE 0x6E` 处于 S0 唤醒使能态，会导致机器入睡后被充电脉冲提前唤醒。
+- 逆向 `AppleACPIPlatformExpert::sleepPlatform()` / `updateWakeDevices()` 可知，macOS 只对位于内部 `fWakeDevices` 集合中的设备打开 `"acpi-wake-s0-gpe"`（`0x6E`），唤醒后调用 `_AcpiHwEnableAllRuntimeGpes()` 自动恢复全部运行态 GPE（因此日常亮屏下的电池/电源键查询不受影响）。
+
+`s0ixstandby-0.5.4-xstation-v1.patch` 新增 `-s0ixacnoecwake`：监听 `IOPMPowerSource` 的 `ExternalConnected` 状态，插电时通过公开 KPI `IOACPIPlatformDevice::setSystemWakeCapabilityEnable(false)` 将 `PWRB` 移出 `fWakeDevices`（屏蔽充电态 `GPE 0x6E` S0 唤醒，保留 USB 键鼠与定时 RTC 唤醒）；拔掉电源切回电池时自动调用 `setSystemWakeCapabilityEnable(true)` 恢复实体电源键唤醒。全程不写任何 EC RAM。
+
+## 常用启动参数
+
+| 启动参数 | 来源 | 作用 |
+|---|---|---|
+| `-s0ixgpureset` | 上游 0.5.4 | 唤醒时对 Tiger Lake GT 执行硬件 `GEN11_GDRST`（约 125–155 µs），避免核显从深睡恢复后渲染引擎卡死 |
+| `-s0ixrefclk` | 上游 0.5.4 | 睡眠期间允许关闭 PCIe 参考时钟，解除 PCH `SLP_S0` 阻塞 |
+| `-s0ixd3` | 上游 0.5.4 | 入睡前将无驱动的 PCI 设备（ISH、TBT DMA、LPSS、DPTF 等）切入 `D3hot`，唤醒后恢复 `D0` |
+| `-s0ixacnortc` | 上游 0.5.4 | 插电且无用户态显式 `pmset schedule` 定时任务时，抑制 macOS 自动维护型 RTC 唤醒 |
+| `-s0ixacnoecwake` | 本项目补丁 | 插电时禁用 `PWRB` 的共享 `GPE 0x6E` S0 唤醒，拔电自动恢复电池电源键唤醒 |
+| `-s0ixdbg` | 上游 0.5.4 | 输出详细串口/内核调试日志（排障用，日常可省略） |
+
+## 复现构建
+
+在安装了 Xcode Command Line Tools 的 macOS 上执行：
+
+```bash
+git clone --branch main https://github.com/labrouss/S0ixStandby /tmp/S0ixStandby
+git -C /tmp/S0ixStandby checkout 28069d3
+git clone --depth 1 https://github.com/acidanthera/MacKernelSDK /tmp/S0ixStandby/MacKernelSDK
+./patches/S0ixStandby/build.sh /tmp/S0ixStandby /tmp/S0ixStandby/MacKernelSDK
+```
+
+构建产物位于 `/tmp/S0ixStandby/build/Release/S0ixStandby.kext`。
+
+## 许可证
+
+上游 `S0ixStandby` 使用 BSD 3-Clause（原版权声明见 [`LICENSE`](LICENSE)，© 2026 The S0ixStandby Authors）。
+本目录补丁与构建脚本同样按 BSD 3-Clause 发布。

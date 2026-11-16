@@ -8,6 +8,39 @@
 
 ---
 
+## v2.0（11-16）插电整晚睡眠与 94% 满电阈值修复
+
+- **问题**：电池模式下 S0ix 睡眠已经稳定，但插着充电器入睡时会遇到两个阻碍：一是 EC 固件在电量充到约 94% 时就停止充电电流（`InstantAmperage = 0`），而 `_BST` 汇报的剩余容量仍低于 `_BIF` 的满电容量，macOS 一直判定“未充满”而不挂断充电电源断言；二是 `H_EC` 与电源键 `PWRB` 共用 `GPE 0x6E`，充电期间 EC 周期性发出 `GPE 0x6E` 查询，会立刻把刚进入 S0ix 的系统吵醒。
+- **思路**：
+  1. 不写任何 EC RAM 寄存器。在 ACPI 层把 `BAT0._BST` 改名为 `XBST`，当检测到充电电流为 0（`_BST[0] & 0x03 == 0`）且剩余容量达到最后满电容量的 94% 及以上时，在 Darwin 下将上报容量对齐到 `_BIF[2]`，让 `AppleSmartBattery` 正常置位 `FullyCharged = Yes`。
+  2. 反汇编 Sequoia `AppleACPIPlatformExpert::sleepPlatform()` / `updateWakeDevices()` 确认：macOS 只在睡眠前对 `fWakeDevices` 列表里的设备开启 `"acpi-wake-s0-gpe"`（`0x6E`），唤醒后调用 `_AcpiHwEnableAllRuntimeGpes()` 自动恢复全部运行态 GPE。因此在 `S0ixStandby` 中监听 `IOPMPowerSource` 的 `ExternalConnected` 状态，插电时调用 `PWRB->setSystemWakeCapabilityEnable(false)` 即可仅屏蔽充电态的 `GPE 0x6E` 睡眠唤醒，拔电时自动设回 `true` 恢复电源键唤醒。
+- **改动**：
+  - 加 `SSDT-BATFULL` 及配套唯一二进制改名 `BAT0._BST → XBST`（DSDT 偏移 `0x073EA`）。
+  - 在 `S0ixStandby 0.5.4` 上增加 `-s0ixacnoecwake` 补丁（`patches/S0ixStandby/s0ixstandby-0.5.4-xstation-v1.patch`），boot-args 同时启用 `-s0ixacnortc -s0ixacnoecwake`。
+- **结果**：2.8 A 大电流快充中及充满后均能稳定进入 S0ix Deep Idle（`CC7 = 99%`、`PC8 = 99%`、核显 `DC9`），连续两轮 2 小时共 4 小时无人值守插电睡眠 0 次误唤醒。插电睡眠可用键盘/USB 唤醒，拔电切回电池后自动恢复实体电源键唤醒。
+
+## v2.0（11-16）S0ix Deep Idle 现代待机与电池电源键唤醒
+
+- **问题**：Tiger Lake-UP3 主板在现代固件下没有可用的传统 S3 挂起路径，此前一旦触发系统睡眠就会 panic 或黑屏死机，只能靠 `SleepDisabled=1` 禁用睡眠；打通平台睡眠后，核显从深睡唤醒时 GT 引擎未复位会导致卡死，且纯电池模式下按实体电源键无法唤醒。
+- **思路**：
+  1. 禁用残缺的 `_S3_`，为 `FADT` 打开 Low Power S0 Idle（`LPS0`），并在 Darwin 下暴露 Intel Power Engine Plugin（`\_SB.PEPD`，`PNP0D80`），让 XNU 走原生 `IOPMSystemSleepType = 7`（Deep Idle）路径。
+  2. 引入 `S0ixStandby 0.5.4` 驱动 `PEPD._DSM` 低功耗通知链：入睡前将无驱动的 PCI 端点（ISH、TBT DMA、LPSS、DPTF 等共 9 项）切入 `D3hot`（`-s0ixd3`）并释放参考时钟（`-s0ixrefclk`）以解除 `SLP_S0` 阻塞；唤醒瞬间对 Tiger Lake GT 执行硬件 `GEN11_GDRST` 复位（`-s0ixgpureset`，耗时约 130 µs）。
+  3. 排查 DSDT 发现 `\_SB.PWRB` 在无 `_PRW` 时不会被 `AppleACPIPlatform` 注册进 S0 唤醒源；在 `SSDT-DEEPIDLE` 中仅对 Darwin 为 `PWRB` 补齐 `PRW0 = Package (2) { 0x6E, 0x04 }`，把 `GPE 0x6E` 接入电源键 S0 唤醒。
+- **改动**：
+  - 加 `SSDT-DEEPIDLE`（`LPS0`、`LXEN`、`PEPD._STA`、`PWRB.PRW0`）及两条唯一 DSDT 补丁 `_S3_ → XS3_`（`0x06055`）、`PEPD._STA → XSTA`（`0x3B58D`）。
+  - 加 `S0ixStandby.kext` 0.5.4，boot-args 启用 `-s0ixgpureset -s0ixrefclk -s0ixd3`，`pmset` 打开睡眠（`disablesleep 0`）。
+- **结果**：合盖、菜单睡眠与空闲睡眠全部走 `SleepType = 7` 稳定睡醒，CPU 核心 `CC7` 与封装 `PC8` 驻留率均达 `99%`，电池模式下短按实体电源键约 2.8 秒即可点亮桌面，连续 9 轮睡眠唤醒与核显硬件复位后实测单核 4.67 GHz、全核 3.94 GHz、Metal 1.34 TFLOPS 无任何降频。
+
+## v2.0（11-16）升级 WhateverXe 0.8.2，解除 `-noDC9` 实现核显真 DC9 冷唤醒
+
+- **问题**：v0.1.42 为了保证关屏后能点亮，靠 `-noDC9 -nodisplaysleepDC6` 绕开了核显低功耗显示状态；不进 `DC9` 时显示电源井常开，会直接阻塞平台 S0ix 深睡。
+- **思路**：上游 WhateverXe 0.8.2 重构了 Tiger Lake 的 `DC9` 显示引擎冷恢复、Render `FORCEWAKE` 成对平衡与 GuC 休眠路径。将本机 Sharp 4K eDP（`SHP14A8`）必需的时序保护（`-wex-tgl-sdt-guard`）与面板断电速率表写回（`-wex-no-panel-keep -wex-sink-rate-restore`）无损迁移到 0.8.2，再去掉 `-noDC9` 验证真 `DC9` 断电恢复。
+- **改动**：
+  - 新增 `patches/WhateverXe/wex-0.8.2-xstation-v1.patch` 与可复现构建脚本 `build-0.8.2.sh`，更新 `EFI/OC/Kexts/WhateverXe.kext` 至 0.8.2。
+  - 系统内同步升级至 WhateverXe Graphics 0.4.4。
+  - boot-args 去掉 `-noDC9`（保留 `-nodisplaysleepDC6 -wex-tgl-sdt-guard -wex-no-panel-keep -wex-sink-rate-restore`）。
+- **结果**：核显在睡眠期间真正进入 `DC9`（`DC_STATE_EN = 0x8`），唤醒时自动写回 DPCD `0x115=0x06`（5.4 Gbps）完成 4K 面板冷训练，不再有黑屏或除零 panic；亮屏静置 CPU 封装功耗降至约 2.0 W（核显 `RC6` 驻留 `99.66%`）。
+
 ## v0.1.55（10-29）USB 定制映射，内置硬盘启动
 
 - **问题**：一直用 USBToolBox 的临时全开映射；BIOS 里的 `_UPC/_PLD` 是公版模板，和实际接口对不上。

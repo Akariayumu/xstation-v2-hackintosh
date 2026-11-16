@@ -1,5 +1,7 @@
 .cache/
 .DS_Store
+__pycache__/
+/third_party/
 
 # scripts/fetch-thirdparty.sh 下载的第三方文件，不要提交（见 THIRD_PARTY.md）
 /EFI/BOOT/BOOTx64.efi
