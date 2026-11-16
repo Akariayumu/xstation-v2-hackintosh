@@ -412,6 +412,83 @@ class StageUsbEfiTests(unittest.TestCase):
         cfg_again = mod.transform_config_plist(cfg, phase=4)
         self.assertEqual(cfg, cfg_again)
 
+    def test_smcprocessor_enabled_after_virtualsmc(self) -> None:
+        for phase in (0, 1, 4):
+            out_dir = self.tmp / f"smcp_p{phase}"
+            mod.stage_usb_efi(phase=phase, out_dir=out_dir)
+            with (out_dir / "EFI" / "OC" / "config.plist").open("rb") as f:
+                cfg = plistlib.load(f)
+
+            kernel_add = cfg["Kernel"]["Add"]
+            bundle_paths = [k["BundlePath"] for k in kernel_add]
+            self.assertIn("VirtualSMC.kext", bundle_paths)
+            self.assertIn("SMCProcessor.kext", bundle_paths)
+
+            vsmc_idx = bundle_paths.index("VirtualSMC.kext")
+            smcp_idx = bundle_paths.index("SMCProcessor.kext")
+            self.assertEqual(
+                smcp_idx,
+                vsmc_idx + 1,
+                f"Phase {phase}: SMCProcessor.kext must immediately follow VirtualSMC.kext",
+            )
+            smcp_entry = kernel_add[smcp_idx]
+            self.assertIs(smcp_entry["Enabled"], True)
+            self.assertEqual(smcp_entry["ExecutablePath"], "Contents/MacOS/SMCProcessor")
+            self.assertEqual(smcp_entry["PlistPath"], "Contents/Info.plist")
+
+            staged_smcp_bin = (
+                out_dir / "EFI" / "OC" / "Kexts" / "SMCProcessor.kext" / "Contents" / "MacOS" / "SMCProcessor"
+            )
+            if (out_dir / "EFI" / "OC" / "OpenCore.efi").is_file():
+                self.assertTrue(staged_smcp_bin.is_file())
+                self.assertTrue(bool(staged_smcp_bin.stat().st_mode & stat.S_IXUSR))
+
+        # Legacy v2.0 config without SMCProcessor.kext gets it inserted right after VirtualSMC.kext
+        legacy_cfg = {
+            "Kernel": {
+                "Add": [
+                    {"BundlePath": "Lilu.kext", "Enabled": True, "MinKernel": "8.0.0", "MaxKernel": ""},
+                    {"BundlePath": "VirtualSMC.kext", "Enabled": True, "MinKernel": "8.0.0", "MaxKernel": ""},
+                    {"BundlePath": "SMCBatteryManager.kext", "Enabled": True, "MinKernel": "24.0.0", "MaxKernel": "24.99.99"},
+                ]
+            }
+        }
+        upgraded = mod.transform_config_plist(legacy_cfg, phase=4)
+        up_paths = [k["BundlePath"] for k in upgraded["Kernel"]["Add"]]
+        self.assertEqual(up_paths[:3], ["Lilu.kext", "VirtualSMC.kext", "SMCProcessor.kext"])
+        self.assertIs(upgraded["Kernel"]["Add"][2]["Enabled"], True)
+        self.assertEqual(upgraded, mod.transform_config_plist(upgraded, phase=4))
+
+    def test_s0ixstandby_v2_patch_gen12_uncore_and_fw_gt_semantics(self) -> None:
+        v2_patch_path = REPO_ROOT / "patches" / "S0ixStandby" / "s0ixstandby-0.5.4-xstation-v2.patch"
+        self.assertTrue(v2_patch_path.is_file())
+        patch_text = v2_patch_path.read_text(encoding="utf-8")
+
+        # Must gate GEN12_RPSTAT1 (0x1381B4) on hardware GEN6_GT_CORE_STATUS (0x138060, bits 2:0 < 3),
+        # never on CPU software FORCEWAKE_RENDER_ACK (0x00D84).
+        self.assertIn("kGen6GtCoreStatus = 0x138060", patch_text)
+        self.assertIn("(coreStatus & 0x7) < 3", patch_text)
+        self.assertIn("kGen12Rpstat1     = 0x1381B4", patch_text)
+
+        refresh_idx = patch_text.index("IOReturn S0ixStandby::refreshGpuFreq()")
+        refresh_body = patch_text[refresh_idx:]
+        self.assertNotIn("kFwRenderAck", refresh_body)
+        self.assertIn("cmd != 0xFFFF", refresh_body)
+        self.assertIn("gpuRead(kFwGtAck)", refresh_body)
+        self.assertIn("gpuRead(kGen6Rpnswreq)", refresh_body)
+        self.assertIn("reqMHz = actualMHz;", refresh_body)
+
+    def test_s0ixstandby_v2_patch_ac_charging_only_ec_wake_policy(self) -> None:
+        v2_patch_path = REPO_ROOT / "patches" / "S0ixStandby" / "s0ixstandby-0.5.4-xstation-v2.patch"
+        patch_text = v2_patch_path.read_text(encoding="utf-8")
+
+        # Must only disable shared EC GPE 0x6E wake while actively charging on AC,
+        # re-enabling once charged/idle on AC or when on battery.
+        self.assertIn("bool wantEnable = !(onAC && acCharging);", patch_text)
+        self.assertIn("belowStopThreshold = (maxCap > 0 && curCap * 100ULL < maxCap * 94ULL)", patch_text)
+        self.assertIn("hasChargeFlow = (instAmp > 0 || avgAmp > 0)", patch_text)
+        self.assertIn('"on AC (charging)" : "on AC (charged)"', patch_text)
+
 
 if __name__ == "__main__":
     unittest.main()

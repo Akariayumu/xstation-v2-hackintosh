@@ -126,10 +126,21 @@ BATFULL_ACPI_ENTRY: dict[str, Any] = {
     "Path": "SSDT-BATFULL.aml",
 }
 
+SMCPROCESSOR_KEXT_ENTRY: dict[str, Any] = {
+    "Arch": "Any",
+    "BundlePath": "SMCProcessor.kext",
+    "Comment": "SMCProcessor 1.3.8 CPU temperature sensors (VirtualSMC 1.3.8)",
+    "Enabled": True,
+    "ExecutablePath": "Contents/MacOS/SMCProcessor",
+    "MaxKernel": "24.99.99",
+    "MinKernel": "24.0.0",
+    "PlistPath": "Contents/Info.plist",
+}
+
 S0IX_KEXT_ENTRY: dict[str, Any] = {
     "Arch": "x86_64",
     "BundlePath": "S0ixStandby.kext",
-    "Comment": "S0ixStandby v0.5.4 (PNP0D80 PEPD _DSM + LPIT/C-state telemetry + TGL GDRST)",
+    "Comment": "S0ixStandby v0.5.4 + v2 (-s0ixacnoecwake + Gen12 GPU freq)",
     "Enabled": True,
     "ExecutablePath": "Contents/MacOS/S0ixStandby",
     "MaxKernel": "",
@@ -369,7 +380,8 @@ def transform_config_plist(
     if "boot-args" not in boot_delete:
         boot_delete.append("boot-args")
 
-    # 2. Widen 24.6.0-locked Kernel -> Add entries to 24.0.0 .. 24.99.99 across Sequoia 15.x.
+    # 2. Widen 24.6.0-locked Kernel -> Add entries to 24.0.0 .. 24.99.99 across Sequoia 15.x,
+    #    and ensure SMCProcessor.kext is enabled right after VirtualSMC.kext.
     kernel_add: list[dict[str, Any]] = cfg.setdefault("Kernel", {}).setdefault("Add", [])
     for entry in kernel_add:
         if entry.get("MinKernel") == "24.6.0":
@@ -378,6 +390,24 @@ def transform_config_plist(
             entry["MaxKernel"] = "24.99.99"
         if wex_version and entry.get("BundlePath") == "WhateverXe.kext":
             entry["Comment"] = f"WhateverXe {wex_version} + X-STATION V2 patchset (staged USB)"
+
+    vsmc_idx = next((i for i, k in enumerate(kernel_add) if k.get("BundlePath") == "VirtualSMC.kext"), None)
+    if vsmc_idx is not None:
+        smcp_idx = next(
+            (i for i, k in enumerate(kernel_add) if k.get("BundlePath") == SMCPROCESSOR_KEXT_ENTRY["BundlePath"]),
+            None,
+        )
+        smcp_copy = copy.deepcopy(SMCPROCESSOR_KEXT_ENTRY)
+        if smcp_idx is not None:
+            if smcp_idx == vsmc_idx + 1:
+                kernel_add[smcp_idx].clear()
+                kernel_add[smcp_idx].update(smcp_copy)
+            else:
+                kernel_add.pop(smcp_idx)
+                new_vsmc_idx = next(i for i, k in enumerate(kernel_add) if k.get("BundlePath") == "VirtualSMC.kext")
+                kernel_add.insert(new_vsmc_idx + 1, smcp_copy)
+        else:
+            kernel_add.insert(vsmc_idx + 1, smcp_copy)
 
     acpi = cfg.setdefault("ACPI", {})
     acpi_add: list[dict[str, Any]] = acpi.setdefault("Add", [])
@@ -564,6 +594,18 @@ def stage_usb_efi(
             expected_executable="S0ixStandby",
             expected_identifier="com.labrouss.S0ixStandby",
         )
+
+    staged_smcp_exec = staged_kexts_dir / "SMCProcessor.kext" / "Contents" / "MacOS" / "SMCProcessor"
+    if not staged_smcp_exec.is_file():
+        repo_smcp = root / "EFI" / "OC" / "Kexts" / "SMCProcessor.kext"
+        if (repo_smcp / "Contents" / "MacOS" / "SMCProcessor").is_file():
+            install_kext_bundle(
+                repo_smcp,
+                staged_kexts_dir,
+                bundle_name="SMCProcessor.kext",
+                expected_executable="SMCProcessor",
+                expected_identifier="as.vit9696.SMCProcessor",
+            )
 
     with src_config.open("rb") as f:
         base_cfg = plistlib.load(f)

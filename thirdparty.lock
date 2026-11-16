@@ -39,6 +39,8 @@ file	EFI/OC/Kexts/NVMeFix.kext/Contents/MacOS/NVMeFix	NVMeFix-1.1.3-RELEASE.zip	
 file	EFI/OC/Kexts/SMCBatteryManager.kext/Contents/Info.plist	VirtualSMC-1.3.8-RELEASE.zip	Kexts/SMCBatteryManager.kext/Contents/Info.plist	99f711358e27a5307f430472360ce99648f850bb0307ed84d7eaa6b014417f26
 file	EFI/OC/Kexts/SMCBatteryManager.kext/Contents/MacOS/SMCBatteryManager	VirtualSMC-1.3.8-RELEASE.zip	Kexts/SMCBatteryManager.kext/Contents/MacOS/SMCBatteryManager	2f0b3525cd85e803b8247ff959f16e3f434d3b8126328e11086b9c0bfddf9216
 file	EFI/OC/Kexts/SMCBatteryManager.kext/Contents/Resources/SSDT-BATC.dsl	VirtualSMC-1.3.8-RELEASE.zip	Kexts/SMCBatteryManager.kext/Contents/Resources/SSDT-BATC.dsl	e66bbd57e5c6ef0ddbc3a6e51f68fe875d84709b73d4772e1c193269f2a89e4b
+file	EFI/OC/Kexts/SMCProcessor.kext/Contents/Info.plist	VirtualSMC-1.3.8-RELEASE.zip	Kexts/SMCProcessor.kext/Contents/Info.plist	82291d0ecdf69d81a535dba2c352dd74c1189d01b6bb0955e924ae27e69e0136
+file	EFI/OC/Kexts/SMCProcessor.kext/Contents/MacOS/SMCProcessor	VirtualSMC-1.3.8-RELEASE.zip	Kexts/SMCProcessor.kext/Contents/MacOS/SMCProcessor	87b0c5497af7a4397180e351073ba047ff2683be95768f1f231589683e4edebe
 file	EFI/OC/Kexts/USBToolBox.kext/Contents/Info.plist	USBToolBox-1.2.0-RELEASE.zip	USBToolBox.kext/Contents/Info.plist	f6095d4d3b026aa05169a71b32313d343ab4ac114a2be667dd64479d6643cab3
 file	EFI/OC/Kexts/USBToolBox.kext/Contents/MacOS/USBToolBox	USBToolBox-1.2.0-RELEASE.zip	USBToolBox.kext/Contents/MacOS/USBToolBox	c5c8dc205a079ee3f90b7875fb5ff622e4f15d32f29cf519123dab2822c422b7
 file	EFI/OC/Kexts/VirtualSMC.kext/Contents/Info.plist	VirtualSMC-1.3.8-RELEASE.zip	Kexts/VirtualSMC.kext/Contents/Info.plist	6d3cf2e1ee61a428b3477cb332fbd285eba715ecfceb12a05cc7b3fda2b95f89

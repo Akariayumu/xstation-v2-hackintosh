@@ -8,6 +8,17 @@
 
 ---
 
+## v2.0.1（11-17）CPU/核显传感器导出与插电满电电源键唤醒
+
+- **问题**：一是 macOS 用户态在 Tiger Lake 上无法直接读取 CPU 封装/核心温度与核显实时频率，若强行在内核做 `FORCEWAKE` 轮询又会破坏核显 `RC6` 省电；二是 `v2.0` 的 `-s0ixacnoecwake` 在插电状态下全程屏蔽共享 `GPE 0x6E`，导致平板未接外置 USB 键鼠时，充满电插着电源休眠也无法通过短按电源键或拔插充电器唤醒。
+- **思路**：
+  1. 启用 `SMCProcessor.kext` 导出 CPU 温度；在 `S0ixStandby` 中新增按需只读入口 `setProperties({"refreshGpuFreq": true})`，仅通过常驻 Uncore 镜像寄存器 `0x138060`（`GEN6_GT_CORE_STATUS`）与 `0x1381B4`（`GEN12_RPSTAT1`）读取活跃态核显频率，硬件处于 `RC6/RC7` 时直接返回 `0 MHz`，全程零 `FORCEWAKE` 写入。
+  2. 实测确认 EC 仅在 `< 94%` 或存在正向充电电流时周期性拉高 `GPE 0x6E`，充满进入零电流稳态后完全静默。将 `-s0ixacnoecwake` 细化为仅在充电进行中屏蔽 `GPE 0x6E`，一旦充满稳态（`on AC (charged)`）或切回电池模式即自动恢复 `PWRB` 唤醒能力。
+- **改动**：
+  - `config.plist` 与 `thirdparty.lock` 启用 `SMCProcessor.kext`（1.3.8）。
+  - 升级 `patches/S0ixStandby/s0ixstandby-0.5.4-xstation-v2.patch` 并重新构建 `S0ixStandby.kext`，更新 66 项 `EFI-sha256.txt`。
+- **结果**：配合 [Xmonitor](https://github.com/Akariayumu/Xmonitor) 可免 `root` 实时读取 CPU 温度与零唤醒损耗的核显 MHz（空闲 `RC6 = 99.9%+`）；插电充满休眠后可直接按实体电源键或拔插充电器唤醒。
+
 ## v2.0（11-16）插电整晚睡眠与 94% 满电阈值修复
 
 - **问题**：电池模式下 S0ix 睡眠已经稳定，但插着充电器入睡时会遇到两个阻碍：一是 EC 固件在电量充到约 94% 时就停止充电电流（`InstantAmperage = 0`），而 `_BST` 汇报的剩余容量仍低于 `_BIF` 的满电容量，macOS 一直判定“未充满”而不挂断充电电源断言；二是 `H_EC` 与电源键 `PWRB` 共用 `GPE 0x6E`，充电期间 EC 周期性发出 `GPE 0x6E` 查询，会立刻把刚进入 S0ix 的系统吵醒。

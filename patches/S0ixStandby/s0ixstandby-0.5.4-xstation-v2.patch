@@ -1,0 +1,583 @@
+diff --git a/S0ixStandby/S0ixGPU.cpp b/S0ixStandby/S0ixGPU.cpp
+index 70a3742..967b816 100644
+--- a/S0ixStandby/S0ixGPU.cpp
++++ b/S0ixStandby/S0ixGPU.cpp
+@@ -44,6 +44,9 @@
+ static const uint32_t kRCS = 0x02000, kBCS = 0x22000;    // engine MMIO bases
+ static const uint32_t kFwRenderReq = 0x0A278, kFwRenderAck = 0x00D84;   // FORCEWAKE_RENDER_GEN9
+ static const uint32_t kFwGtReq     = 0x0A188, kFwGtAck     = 0x130044;  // FORCEWAKE_GT_GEN9
++static const uint32_t kGen6Rpnswreq     = 0x0A008;       // GEN6_RPNSWREQ (FORCEWAKE_GT, bits 31:23 = req ratio)
++static const uint32_t kGen6GtCoreStatus = 0x138060;      // GEN6_GT_CORE_STATUS (uncore mirror, bits 2:0: 0=RC0, 3=RC6, 4=RC7)
++static const uint32_t kGen12Rpstat1     = 0x1381B4;      // GEN12_RPSTAT1 (uncore mirror, bits 19:11 = CAGF)
+ static const uint32_t kGDRST = 0x0941C;                  // GEN6_GDRST
+ static const uint32_t kGrdomFull = 1u << 0;              // GEN11_GRDOM_FULL
+ static const uint32_t kResetCtl = 0xD0;                  // RING_RESET_CTL (engine relative)
+@@ -222,17 +225,24 @@ bool S0ixStandby::setupGPU()
+ 	found->findPCICapability(kIOPCIPowerManagementCapability, &pm);
+ 
+ 	cleanNvram();
+-	dispTgl = cpuModel != 0x7D && cpuModel != 0x7E;   // Ice Lake keeps the Gen9 counter layout
++	bool isGen12 = cpuModel != 0x7D && cpuModel != 0x7E;   // Ice Lake keeps the Gen9 counter layout
+ 	// The wake-time GT reset was developed and tested on Tiger Lake with
+ 	// WhateverXe. Elsewhere (Ice Lake, Alder/Raptor Lake, NootedGreen, ...)
+ 	// it stays off unless asked for with -s0ixgpureset.
+ 	bool tgl = cpuModel == 0x8C || cpuModel == 0x8D;
+ 	bool resetDefaultOff = gpuReset && !tgl && !gpuResetForced;
+ 	if (resetDefaultOff) gpuReset = false;
++	if (gpuFreqLock) IOLockLock(gpuFreqLock);
++	dispTgl = isGen12;
+ 	gpuDev = found;
+ 	gpuMap = map;
+ 	gpuPmCap = pm;
+ 	gpuMMIO = reinterpret_cast<volatile uint8_t *>(map->getVirtualAddress());
++	if (dispTgl) {
++		setProperty("GPU Current Freq MHz", (unsigned long long)0, 32);
++		setProperty("GPU Requested Freq MHz", (unsigned long long)0, 32);
++	}
++	if (gpuFreqLock) IOLockUnlock(gpuFreqLock);
+ 
+ 	char buf[128];
+ 	uint32_t id = found->configRead32(kIOPCIConfigVendorID);
+@@ -584,3 +594,55 @@ void S0ixStandby::publishDisplay()
+ 		}
+ 	}
+ }
++
++// --- On-demand Gen12 GPU frequency export (read-only, zero-forcewake) --------
++// Triggered from user space via IORegistryEntrySetCFProperties({"refreshGpuFreq": true}).
++// Never writes PCI config space or MMIO forcewake registers:
++//   - 0x138060 (GEN6_GT_CORE_STATUS) and 0x1381B4 (GEN12_RPSTAT1) lie in the
++//     always-on uncore/PCU mirror range (0x40000..0x1bffff, FORCEWAKE_NONE).
++//   - 0x0A008 (GEN6_RPNSWREQ) lies in FORCEWAKE_GT (0x9800..0xafff), so it is
++//     only read when 0x130044 (FORCEWAKE_GT_ACK) already has an active lease;
++//     otherwise Requested MHz falls back to Current MHz.
++
++IOReturn S0ixStandby::refreshGpuFreq()
++{
++	if (!gpuFreqLock)
++		return kIOReturnUnsupported;
++	IOLockLock(gpuFreqLock);
++	if (isInactive() || !gpuMMIO || !gpuDev || !dispTgl) {
++		IOLockUnlock(gpuFreqLock);
++		return kIOReturnUnsupported;
++	}
++	uint32_t actualMHz = 0;
++	uint32_t reqMHz = 0;
++	if (!gpuSleeping) {
++		uint16_t pmcsr = gpuPmCap ? gpuDev->configRead16(gpuPmCap + kPmcsrOff) : 0;
++		uint16_t cmd = gpuDev->configRead16(kIOPCIConfigCommand);
++		if ((pmcsr & 3) == 0 && cmd != 0xFFFF && (cmd & kIOPCICommandMemorySpace) != 0) {
++			uint32_t coreStatus = gpuRead(kGen6GtCoreStatus);
++			if (coreStatus != 0xFFFFFFFF && (coreStatus & 0x7) < 3) {
++				uint32_t rpstat1 = gpuRead(kGen12Rpstat1);
++				if (rpstat1 != 0xFFFFFFFF) {
++					uint32_t cagf = (rpstat1 >> 11) & 0x1FF;
++					actualMHz = (cagf * 50 + 1) / 3;
++				}
++				if (actualMHz > 0) {
++					uint32_t gtAck = gpuRead(kFwGtAck);
++					if (gtAck != 0xFFFFFFFF && (gtAck & 0xFFFF) != 0) {
++						uint32_t rpnswreq = gpuRead(kGen6Rpnswreq);
++						if (rpnswreq != 0xFFFFFFFF) {
++							uint32_t req = (rpnswreq >> 23) & 0x1FF;
++							reqMHz = (req * 50 + 1) / 3;
++						}
++					}
++					if (reqMHz == 0)
++						reqMHz = actualMHz;
++				}
++			}
++		}
++	}
++	setProperty("GPU Current Freq MHz", (unsigned long long)actualMHz, 32);
++	setProperty("GPU Requested Freq MHz", (unsigned long long)reqMHz, 32);
++	IOLockUnlock(gpuFreqLock);
++	return kIOReturnSuccess;
++}
+diff --git a/S0ixStandby/S0ixStandby.cpp b/S0ixStandby/S0ixStandby.cpp
+index 70b6d13..263de69 100644
+--- a/S0ixStandby/S0ixStandby.cpp
++++ b/S0ixStandby/S0ixStandby.cpp
+@@ -31,6 +31,9 @@
+ //                          restore on wake (experimental)
+ //              -s0ixgpuprobe  also probe an idle GPU (canary) and keep the last
+ //                          result in NVRAM (s0ix-gpu-last); for debugging
++//              -s0ixacnoecwake  disable S0 wake on ACPI devices sharing the EC
++//                          GPE while actively charging on AC, restoring wake
++//                          capability once charged/idle or on battery
+ //              s0ixfn=N    bitmask of _DSM functions allowed to run, e.g.
+ //                          s0ixfn=0x18 = display off/on only (3,4),
+ //                          s0ixfn=0x60 = entry/exit only (5,6). Default: all.
+@@ -307,6 +310,7 @@ bool S0ixStandby::start(IOService *provider)
+ 	wifiPM = bootArg("-s0ixwifipm");
+ 	refclkWA = bootArg("-s0ixrefclk");
+ 	acNoRtc = bootArg("-s0ixacnortc");
++	acNoEcWake = bootArg("-s0ixacnoecwake");
+ 	ecWake = bootArg("-s0ixecwake");
+ 	uint32_t fn = 0;
+ 	if (PE_parse_boot_argn("s0ixfn", &fn, sizeof(fn)))
+@@ -396,18 +400,42 @@ bool S0ixStandby::start(IOService *provider)
+ 		setProperty("Wi-Fi PCI PM", "pending (set up 30 s after boot)");
+ 	}
+ 
++	setupWakeInfo();
++
++	bool needAcTimer = false;
+ 	if (acNoRtc) {
+-		if (setupRtcBlock() && workLoop) {
+-			acTimer = IOTimerEventSource::timerEventSource(this, &S0ixStandby::acTimerFired);
+-			if (acTimer && workLoop->addEventSource(acTimer) != kIOReturnSuccess)
+-				OSSafeReleaseNULL(acTimer);
+-			if (acTimer) acTimer->setTimeoutMS(5000);
+-		}
++		if (setupRtcBlock())
++			needAcTimer = true;
+ 	} else {
+ 		setProperty("AC RTC wake block", "off (boot-arg -s0ixacnortc)");
+ 	}
+ 
+-	setupWakeInfo();
++	if (acNoEcWake) {
++		acWakeLock = IOLockAlloc();
++		needAcTimer = true;
++	} else {
++		setProperty("AC EC wake block", "off (boot-arg -s0ixacnoecwake)");
++	}
++
++	if (needAcTimer && workLoop) {
++		acTimer = IOTimerEventSource::timerEventSource(this, &S0ixStandby::acTimerFired);
++		if (acTimer && workLoop->addEventSource(acTimer) != kIOReturnSuccess)
++			OSSafeReleaseNULL(acTimer);
++		if (acTimer)
++			acTimer->setTimeoutMS(acNoEcWake ? 3000 : 5000);
++	}
++
++	if (acNoEcWake) {
++		syncAcWakePolicy(true);
++		if (OSDictionary *match = serviceMatching("IOPMPowerSource")) {
++			psPublishNotifier = addMatchingNotification(
++			    gIOFirstPublishNotification, match,
++			    &S0ixStandby::powerSourcePublished, this, nullptr, 0);
++			match->release();
++		}
++	} else if (acTimer) {
++		updateAC();
++	}
+ 
+ 	if (workLoop) {
+ 		battTimer = IOTimerEventSource::timerEventSource(this, &S0ixStandby::battTimerFired);
+@@ -417,6 +445,8 @@ bool S0ixStandby::start(IOService *provider)
+ 		setProperty("Battery full state", "pending (first check 30 s after boot)");
+ 	}
+ 
++	if (gpuProbe || gpuReset)
++		gpuFreqLock = IOLockAlloc();
+ 	if ((gpuProbe || gpuReset) && !setupGPU() && gpuTries < 100 && workLoop) {
+ 		// The iGPU nub may not be published yet this early: retry.
+ 		gpuTimer = IOTimerEventSource::timerEventSource(this, &S0ixStandby::gpuTimerFired);
+@@ -488,6 +518,29 @@ void S0ixStandby::stop(IOService *provider)
+ 		battTimer->cancelTimeout();
+ 		if (workLoop) workLoop->removeEventSource(battTimer);
+ 	}
++	IONotifier *interest = nullptr;
++	IONotifier *publish = nullptr;
++	if (acWakeLock) IOLockLock(acWakeLock);
++	interest = psInterestNotifier;
++	psInterestNotifier = nullptr;
++	publish = psPublishNotifier;
++	psPublishNotifier = nullptr;
++	if (acWakeLock) IOLockUnlock(acWakeLock);
++	if (interest) interest->remove();
++	if (publish) publish->remove();
++	if (acNoEcWake) {
++		if (acWakeLock) IOLockLock(acWakeLock);
++		for (uint32_t i = 0; i < ecWakeDevCount; i++)
++			if (ecWakeDevs[i]) ecWakeDevs[i]->setSystemWakeCapabilityEnable(true);
++		ecWakeAppliedValid = false;
++		ecWakeAppliedEnable = true;
++		if (acWakeLock) IOLockUnlock(acWakeLock);
++	}
++	if (gpuFreqLock) {
++		IOLockLock(gpuFreqLock);
++		gpuSleeping = true;
++		IOLockUnlock(gpuFreqLock);
++	}
+ 	IOService::stop(provider);
+ }
+ 
+@@ -506,9 +559,13 @@ void S0ixStandby::free()
+ 	OSSafeReleaseNULL(acTimer);
+ 	OSSafeReleaseNULL(battTimer);
+ 	OSSafeReleaseNULL(workLoop);
++	for (uint32_t i = 0; i < ecWakeDevCount; i++) OSSafeReleaseNULL(ecWakeDevs[i]);
++	ecWakeDevCount = 0;
++	if (acWakeLock) { IOLockFree(acWakeLock); acWakeLock = nullptr; }
+ 	gpuMMIO = nullptr;
+ 	OSSafeReleaseNULL(gpuMap);
+ 	OSSafeReleaseNULL(gpuDev);
++	if (gpuFreqLock) { IOLockFree(gpuFreqLock); gpuFreqLock = nullptr; }
+ 	for (uint32_t i = 0; i < d3Count; i++) OSSafeReleaseNULL(d3Dev[i]);
+ 	d3Count = 0;
+ 	if (d3Lock) { IOLockFree(d3Lock); d3Lock = nullptr; }
+@@ -522,6 +579,15 @@ void S0ixStandby::free()
+ 	IOService::free();
+ }
+ 
++IOReturn S0ixStandby::setProperties(OSObject *properties)
++{
++	if (OSDictionary *d = OSDynamicCast(OSDictionary, properties)) {
++		if (d->getObject("refreshGpuFreq") == kOSBooleanTrue)
++			return refreshGpuFreq();
++	}
++	return IOService::setProperties(properties);
++}
++
+ // ---------------------------------------------------------------------------
+ // LPS0 _DSM
+ // ---------------------------------------------------------------------------
+@@ -1208,24 +1274,209 @@ void S0ixStandby::publishWakeInfo()
+ void S0ixStandby::updateAC()
+ {
+ 	bool ac = false;
++	bool activeChg = false;
++	bool seen = false;
+ 	if (OSDictionary *match = serviceMatching("IOPMPowerSource")) {
+ 		if (OSIterator *it = getMatchingServices(match)) {
+-			while (OSObject *o = it->getNextObject())
+-				if (IOService *ps = OSDynamicCast(IOService, o))
+-					if (OSBoolean *b = OSDynamicCast(OSBoolean, ps->getProperty("ExternalConnected")))
+-						if (b->isTrue()) ac = true;
++			while (OSObject *o = it->getNextObject()) {
++				if (IOService *ps = OSDynamicCast(IOService, o)) {
++					if (OSBoolean *b = OSDynamicCast(OSBoolean, ps->getProperty("ExternalConnected"))) {
++						seen = true;
++						if (b->isTrue()) {
++							ac = true;
++							bool chg = false, full = false;
++							if (OSBoolean *cb = OSDynamicCast(OSBoolean, ps->getProperty("IsCharging")))
++								chg = cb->isTrue();
++							if (OSBoolean *fb = OSDynamicCast(OSBoolean, ps->getProperty("FullyCharged")))
++								full = fb->isTrue();
++							uint64_t curCap = 0, maxCap = 0;
++							if (OSNumber *cn = OSDynamicCast(OSNumber, ps->getProperty("CurrentCapacity")))
++								curCap = cn->unsigned64BitValue();
++							if (OSNumber *mn = OSDynamicCast(OSNumber, ps->getProperty("MaxCapacity")))
++								maxCap = mn->unsigned64BitValue();
++							int64_t instAmp = 0, avgAmp = 0;
++							if (OSNumber *in = OSDynamicCast(OSNumber, ps->getProperty("InstantAmperage")))
++								instAmp = static_cast<int64_t>(in->unsigned64BitValue());
++							if (OSNumber *an = OSDynamicCast(OSNumber, ps->getProperty("Amperage")))
++								avgAmp = static_cast<int64_t>(an->unsigned64BitValue());
++							if (chg && !full) {
++								bool belowStopThreshold = (maxCap > 0 && curCap * 100ULL < maxCap * 94ULL);
++								bool hasChargeFlow = (instAmp > 0 || avgAmp > 0);
++								if (belowStopThreshold || hasChargeFlow || maxCap == 0)
++									activeChg = true;
++							}
++						}
++					}
++				}
++			}
+ 			it->release();
+ 		}
+ 		match->release();
+ 	}
+-	onAC = ac;
++	if (seen) {
++		psSeen = true;
++		onAC = ac;
++		acCharging = activeChg;
++	}
++}
++
++void S0ixStandby::findEcWakeDevices()
++{
++	if (ecGpe == 0xFFFFFFFF)
++		findEcGpe();
++	if (ecGpe == 0xFFFFFFFF)
++		return;
++	const IORegistryPlane *plane = IORegistryEntry::getPlane("IOACPIPlane");
++	if (!plane)
++		return;
++	IORegistryIterator *it = IORegistryIterator::iterateOver(plane, kIORegistryIterateRecursively);
++	if (!it)
++		return;
++	while (IORegistryEntry *e = it->getNextObject()) {
++		IOACPIPlatformDevice *dev = OSDynamicCast(IOACPIPlatformDevice, e);
++		if (!dev)
++			continue;
++		OSNumber *s0Gpe = OSDynamicCast(OSNumber, dev->getProperty("acpi-wake-s0-gpe"));
++		if (!s0Gpe || s0Gpe->unsigned32BitValue() != ecGpe)
++			continue;
++		if (acWakeLock) IOLockLock(acWakeLock);
++		bool exists = false;
++		for (uint32_t i = 0; i < ecWakeDevCount; i++) {
++			if (ecWakeDevs[i] == dev) {
++				exists = true;
++				break;
++			}
++		}
++		if (!exists && ecWakeDevCount < kMaxEcWakeDevs) {
++			dev->retain();
++			ecWakeDevs[ecWakeDevCount++] = dev;
++			ecWakeAppliedValid = false;
++		}
++		if (acWakeLock) IOLockUnlock(acWakeLock);
++	}
++	it->release();
++}
++
++void S0ixStandby::publishAcEcWake()
++{
++	if (!acNoEcWake) {
++		setProperty("AC EC wake block", "off (boot-arg -s0ixacnoecwake)");
++		return;
++	}
++	char names[64];
++	names[0] = 0;
++	size_t pos = 0;
++	uint32_t count = 0;
++	bool appliedValid = false;
++	bool appliedEnable = true;
++	if (acWakeLock) IOLockLock(acWakeLock);
++	count = ecWakeDevCount;
++	appliedValid = ecWakeAppliedValid;
++	appliedEnable = ecWakeAppliedEnable;
++	for (uint32_t i = 0; i < ecWakeDevCount; i++) {
++		const char *nm = (ecWakeDevs[i] && ecWakeDevs[i]->getName()) ? ecWakeDevs[i]->getName() : "?";
++		if (pos < sizeof(names)) {
++			int n = snprintf(names + pos, sizeof(names) - pos, "%s%s", i ? ", " : "", nm);
++			if (n > 0) pos += (size_t)n;
++		}
++	}
++	if (acWakeLock) IOLockUnlock(acWakeLock);
++
++	char buf[160];
++	if (ecGpe == 0xFFFFFFFF) {
++		snprintf(buf, sizeof(buf), "pending: waiting for EC _GPE");
++	} else if (!count) {
++		snprintf(buf, sizeof(buf), "pending: waiting for ACPI wake device with acpi-wake-s0-gpe == 0x%x", ecGpe);
++	} else if (!psSeen || !appliedValid) {
++		snprintf(buf, sizeof(buf), "pending: waiting for IOPMPowerSource (%s, GPE 0x%x)", names, ecGpe);
++	} else {
++		const char *modeStr = !onAC ? "on battery"
++		                            : (acCharging ? "on AC (charging)" : "on AC (charged)");
++		snprintf(buf, sizeof(buf), "%s: %s (GPE 0x%x) wake %s",
++		         modeStr, names, ecGpe,
++		         appliedEnable ? "enabled" : "disabled");
++	}
++	setProperty("AC EC wake block", buf);
++	setProperty("On AC (last check)", onAC);
++}
++
++void S0ixStandby::syncAcWakePolicy(bool updateRegistry)
++{
++	bool prevSeen = psSeen;
++	bool prevAC = onAC;
++	bool prevCharging = acCharging;
++	if (updateRegistry) {
++		updateAC();
++		if (acNoEcWake && ecWakeDevCount == 0) {
++			bool hadEcGpe = (ecGpe != 0xFFFFFFFF);
++			findEcWakeDevices();
++			if (!hadEcGpe && ecGpe != 0xFFFFFFFF)
++				publishEcWake();
++		}
++	}
++	if (!acNoEcWake)
++		return;
++
++	bool changed = false;
++	if (psSeen) {
++		bool wantEnable = !(onAC && acCharging);
++		if (acWakeLock) IOLockLock(acWakeLock);
++		if (ecWakeDevCount > 0 && (!ecWakeAppliedValid || ecWakeAppliedEnable != wantEnable || !updateRegistry)) {
++			changed = (!ecWakeAppliedValid || ecWakeAppliedEnable != wantEnable);
++			for (uint32_t i = 0; i < ecWakeDevCount; i++) {
++				if (ecWakeDevs[i])
++					ecWakeDevs[i]->setSystemWakeCapabilityEnable(wantEnable);
++			}
++			ecWakeAppliedEnable = wantEnable;
++			ecWakeAppliedValid = true;
++		}
++		if (acWakeLock) IOLockUnlock(acWakeLock);
++	}
++
++	if (updateRegistry) {
++		publishAcEcWake();
++		if (psSeen && (!prevSeen || prevAC != onAC || prevCharging != acCharging || changed))
++			battCheck();
++		if (changed) {
++			if (OSString *s = OSDynamicCast(OSString, getProperty("AC EC wake block")))
++				LOG("AC EC wake block: %s", s->getCStringNoCopy());
++			publishLog();
++		}
++	}
++}
++
++bool S0ixStandby::powerSourcePublished(void *target, void *, IOService *newService, IONotifier *)
++{
++	S0ixStandby *self = OSDynamicCast(S0ixStandby, static_cast<OSObject *>(target));
++	if (!self || !newService)
++		return true;
++	if (self->acWakeLock) IOLockLock(self->acWakeLock);
++	if (!self->psInterestNotifier) {
++		self->psInterestNotifier = newService->registerInterest(
++		    gIOGeneralInterest, &S0ixStandby::powerSourceInterest, self, nullptr);
++	}
++	if (self->acWakeLock) IOLockUnlock(self->acWakeLock);
++	if (self->acTimer)
++		self->acTimer->setTimeoutMS(1);
++	return true;
++}
++
++IOReturn S0ixStandby::powerSourceInterest(void *target, void *, UInt32, IOService *, void *, vm_size_t)
++{
++	S0ixStandby *self = OSDynamicCast(S0ixStandby, static_cast<OSObject *>(target));
++	if (self && self->acTimer)
++		self->acTimer->setTimeoutMS(1);
++	return kIOReturnSuccess;
+ }
+ 
+ void S0ixStandby::acTimerFired(OSObject *owner, IOTimerEventSource *sender)
+ {
+ 	if (S0ixStandby *self = OSDynamicCast(S0ixStandby, owner)) {
+-		self->updateAC();
+-		sender->setTimeoutMS(10000);
++		if (self->acNoEcWake)
++			self->syncAcWakePolicy(true);
++		else
++			self->updateAC();
++		sender->setTimeoutMS(self->acNoEcWake ? 3000 : 10000);
+ 	}
+ }
+ 
+@@ -1263,9 +1514,13 @@ void S0ixStandby::battCheck()
+ 				if (!psNum(ps, "CurrentCapacity", cur) || !psNum(ps, "MaxCapacity", max) || !max) continue;
+ 				psBool(ps, "IsCharging", chg);
+ 				psBool(ps, "FullyCharged", full);
++				uint64_t rawInst = 0, rawAvg = 0;
++				int64_t instAmp = psNum(ps, "InstantAmperage", rawInst) ? static_cast<int64_t>(rawInst) : 0;
++				int64_t avgAmp  = psNum(ps, "Amperage", rawAvg) ? static_cast<int64_t>(rawAvg) : 0;
++				bool activeChg = chg && !full && ((cur * 100ULL < max * 94ULL) || instAmp > 0 || avgAmp > 0);
+ 				if (!ext) state = kBattery;
+-				else if (chg) state = kCharging;
+-				else if (full) state = kFull;
++				else if (activeChg) state = kCharging;
++				else if (full || (chg && cur * 100ULL >= max * 94ULL && instAmp <= 0 && avgAmp <= 0)) state = kFull;
+ 				else if (cur < max && cur * 100 >= max * 97) state = kStuck;
+ 				else state = kNotFull;
+ 				break;
+@@ -1308,6 +1563,8 @@ void S0ixStandby::battTimerFired(OSObject *owner, IOTimerEventSource *sender)
+ 			self->findEcGpe();
+ 			if (self->ecGpe != 0xFFFFFFFF) self->publishEcWake();
+ 		}
++		if (self->acNoEcWake && self->ecWakeDevCount == 0)
++			self->syncAcWakePolicy(true);
+ 		self->publishLog();
+ 		sender->setTimeoutMS(60000);
+ 	}
+@@ -1325,8 +1582,16 @@ void S0ixStandby::onSleep()
+ 	timeAtSleep = mach_absolute_time();
+ 	if (cstateMask) { readCStates(csAtSleep); tscAtSleep = rdtsc(); e2AtSleep = rdmsr(kMsrPkgCstConfig); }
+ 
+-	if (lastSleepType == kSleepTypeDeepIdle)
++	if (lastSleepType == kSleepTypeDeepIdle) {
+ 		d3Enter();
++		if (acNoEcWake)
++			syncAcWakePolicy(false);
++	}
++	if (gpuFreqLock) {
++		IOLockLock(gpuFreqLock);
++		gpuSleeping = true;
++		IOLockUnlock(gpuFreqLock);
++	}
+ 	if (gpuMMIO) {
+ 		gpuSleep();
+ 		dispCapture(dispAtSleep, nullptr);
+@@ -1388,6 +1653,11 @@ void S0ixStandby::onWake()
+ 		if (refclkWA) refclkWake();
+ 		gpuWake();
+ 	}
++	if (gpuFreqLock) {
++		IOLockLock(gpuFreqLock);
++		gpuSleeping = false;
++		IOLockUnlock(gpuFreqLock);
++	}
+ 	wifiPmcsrWake = wifiDev ? wifiDev->configRead16(wifiPmCap + 4) : 0xFFFF;
+ 	counterAtWake = 0;
+ 	readCounter(counterAtWake);
+@@ -1475,6 +1745,8 @@ void S0ixStandby::publish()
+ 		setProperty("AC RTC wake blocks", (unsigned long long)rtcBlockCount, 32);
+ 		setProperty("On AC (last check)", onAC);
+ 	}
++	if (acNoEcWake)
++		syncAcWakePolicy(true);
+ 	publishWakeInfo();
+ 	setProperty("Last sleep type", (unsigned long long)snap.sleepType, 32);
+ 	setProperty("Last DSM entry/exit", snap.sleepType == kSleepTypeDeepIdle && dsmEnabled);
+diff --git a/S0ixStandby/S0ixStandby.hpp b/S0ixStandby/S0ixStandby.hpp
+index 06c299b..d33afdd 100644
+--- a/S0ixStandby/S0ixStandby.hpp
++++ b/S0ixStandby/S0ixStandby.hpp
+@@ -16,6 +16,7 @@
+ #include <IOKit/IOWorkLoop.h>
+ #include <IOKit/IOTimerEventSource.h>
+ #include <IOKit/IOMemoryDescriptor.h>
++#include <IOKit/IONotifier.h>
+ #include <IOKit/acpi/IOACPIPlatformDevice.h>
+ #include <IOKit/pci/IOPCIDevice.h>
+ 
+@@ -29,6 +30,7 @@ public:
+ 	bool start(IOService *provider) override;
+ 	void stop(IOService *provider) override;
+ 	void free() override;
++	IOReturn setProperties(OSObject *properties) override;
+ 
+ 	using IOService::callPlatformFunction;
+ 
+@@ -199,6 +201,9 @@ private:
+ 	void gpuResetNow();
+ 	void gpuFormat(const GpuState &s, char *out, size_t size);
+ 	void publishGPU();
++	IOLock *gpuFreqLock {nullptr};
++	bool gpuSleeping {false};
++	IOReturn refreshGpuFreq();
+ 	DispState dispAtSleep {}, dispAtWake {};
+ 	bool dispTgl {false};                    // Gen12 (TGL+) DMC debug counter layout
+ 	void dispCapture(DispState &d, const DispState *ref);
+@@ -228,12 +233,33 @@ private:
+ 	bool setupWifiPM();
+ 
+ 	// -s0ixacnortc: no RTC alarm wakes from Deep Idle while on AC
+-	bool acNoRtc {false}, onAC {false}, rtcBlocked {false};
++	bool acNoRtc {false}, onAC {false}, acCharging {false}, psSeen {false}, rtcBlocked {false};
+ 	uint16_t pm1EnPort {0}, pm1EnSaved {0};
+ 	uint8_t cmosBSaved {0};
+ 	uint32_t rtcBlockCount {0};
+ 	IOTimerEventSource *acTimer {nullptr};
+ 
++	// -s0ixacnoecwake: disable ACPI wake capability on S0 wake devices whose
++	// acpi-wake-s0-gpe matches the EC GPE (e.g. PWRB with PRW0 = GPE 0x6e)
++	// only while actively charging on AC, re-enabling once full/idle or on battery
++	// so physical power-button and AC unplug/replug wakes work when charged.
++	enum { kMaxEcWakeDevs = 4 };
++	bool acNoEcWake {false};
++	bool ecWakeAppliedValid {false}, ecWakeAppliedEnable {true};
++	IOLock *acWakeLock {nullptr};
++	IOACPIPlatformDevice *ecWakeDevs[kMaxEcWakeDevs] {};
++	uint32_t ecWakeDevCount {0};
++	IONotifier *psPublishNotifier {nullptr};
++	IONotifier *psInterestNotifier {nullptr};
++	void findEcWakeDevices();
++	void syncAcWakePolicy(bool updateRegistry);
++	void publishAcEcWake();
++	static bool powerSourcePublished(void *target, void *refCon,
++	                                 IOService *newService, IONotifier *notifier);
++	static IOReturn powerSourceInterest(void *target, void *refCon,
++	                                    UInt32 messageType, IOService *provider,
++	                                    void *messageArgument, vm_size_t argSize);
++
+ 	// Wake sources (read-only by default) and -s0ixecwake: keep the EC's
+ 	// GPE armed during Deep Idle so lid open (EC query) can wake.
+ 	bool ecWake {false}, ecArm {false}, ecArmed {false}, wakeInfoValid {false};

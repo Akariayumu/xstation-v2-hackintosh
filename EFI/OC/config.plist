@@ -579,6 +579,24 @@
 				<key>Arch</key>
 				<string>Any</string>
 				<key>BundlePath</key>
+				<string>SMCProcessor.kext</string>
+				<key>Comment</key>
+				<string>SMCProcessor 1.3.8 CPU temperature sensors (VirtualSMC 1.3.8)</string>
+				<key>Enabled</key>
+				<true/>
+				<key>ExecutablePath</key>
+				<string>Contents/MacOS/SMCProcessor</string>
+				<key>MaxKernel</key>
+				<string>24.99.99</string>
+				<key>MinKernel</key>
+				<string>24.0.0</string>
+				<key>PlistPath</key>
+				<string>Contents/Info.plist</string>
+			</dict>
+			<dict>
+				<key>Arch</key>
+				<string>Any</string>
+				<key>BundlePath</key>
 				<string>SMCBatteryManager.kext</string>
 				<key>Comment</key>
 				<string>SMCBatteryManager 1.3.8 battery status (VirtualSMC 1.3.8)</string>
@@ -869,7 +887,7 @@
 				<key>BundlePath</key>
 				<string>S0ixStandby.kext</string>
 				<key>Comment</key>
-				<string>S0ixStandby 0.5.4 + patches/S0ixStandby (-s0ixacnoecwake)</string>
+				<string>S0ixStandby 0.5.4 + patches/S0ixStandby (v2: -s0ixacnoecwake + Gen12 GPU freq)</string>
 				<key>Enabled</key>
 				<true/>
 				<key>ExecutablePath</key>

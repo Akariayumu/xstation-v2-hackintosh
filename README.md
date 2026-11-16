@@ -5,7 +5,7 @@ i7-1165G7 / Iris Xe 二合一平板电脑上的 macOS Sequoia OpenCore EFI、ACP
 > **实验性项目。** 显卡与现代待机分别依赖社区驱动 [WhateverXe](https://github.com/b00t0x/WhateverXe)（0.8.2）和 [S0ixStandby](https://github.com/labrouss/S0ixStandby)（0.5.4）。
 > 请先用 U 盘启动验证，保留原系统和数据备份。本项目与 Apple、Intel 及整机厂商无关。
 
-当前版本：**EFI v2.0**（2026-11-16），macOS Sequoia 15.8.1（24H32），OpenCore 1.0.8，SMBIOS `MacBookPro16,2`。  
+当前版本：**EFI v2.0.1**（2026-11-17），macOS Sequoia 15.8.1（24H32），OpenCore 1.0.8，SMBIOS `MacBookPro16,2`。  
 旧版 `v0.1.55`（禁用睡眠基线）已归档在 [`v1` 分支](../../tree/v1)。
 
 ## 硬件
@@ -62,9 +62,19 @@ i7-1165G7 / Iris Xe 二合一平板电脑上的 macOS Sequoia OpenCore EFI、ACP
 | **内存（LPDDR4X-4267）** | STREAM Triad（528 MB）/ 随机延迟 | 单线程 **21.3 GB/s** / 8 线程 **44.1 GB/s**；延迟 L1d **1.31 ns**、L2 **4.00 ns**、L3 **12.35 ns**、DRAM **131.7 ns** |
 | **内置 NVMe（绕过缓存）** | 1 GB 顺序读写 / 4K 随机读（`F_NOCACHE`） | 顺序读 **1,790.3 MB/s**、顺序写（含 `fsync`）**1,540.0 MB/s**；4K 随机读 QD1 **13,467 IOPS**（74.3 µs）、8 线程 **100,480 IOPS**（411.6 MB/s） |
 
+## 配套软件推荐（平板触控与低功耗场景定制）
+
+针对本机 **二合一触控平板形态** 与 **Tiger Lake S0ix 现代待机低功耗要求**，配套开发并维护了以下三款原生 macOS 工具（均无需安装 `Xcode.app`，使用 Command Line Tools 即可编译）：
+
+| 项目 | 定位 | 核心特性与本机联动优化 |
+|---|---|---|
+| **[Xmonitor](https://github.com/Akariayumu/Xmonitor)** | 原生硬件监控套件 | 顶部同色菜单栏 + 壁纸层常驻小组件 + 8 页签深度控制台。进程内零子进程直读 `APERF/MPERF` 真实频率、RAPL 封装/核显功率、`SMCProcessor` 温度、`S0ixStandby` 零 Forcewake 核显 MHz、SMC 实时充放电净流、NVMe SMART 与 S0ix `CC7 / PC8 / DC9` 驻留诊断；熄屏与睡眠自动降为 `0 Hz` 零唤醒，常驻 CPU `< 0.3%`。 |
+| **[ScreenBoard](https://github.com/Akariayumu/ScreenBoard-for-Mac)** | 仿 Win11 触摸屏幕键盘 | 专为拆下磁吸键盘后的纯平板触控模式打造。浮动面板不抢当前窗口输入焦点，支持底部铺满停靠、自由浮动与左右分体拇指布局；虚拟键码直通系统原生拼音输入法，支持长按备选符号、按词删改移动与点按文本框自动弹出。 |
+| **[Wallpaper4Mac](https://github.com/Akariayumu/Wallpaper4Mac)** | 低功耗动态视频壁纸 | 原生菜单栏管理端 + 静音硬解播放内核 + `hevc_videotoolbox` 硬件转码脚本。针对本机功耗与窗口看门狗做了激进省电联动：关屏、S0ix 睡眠、切电池供电、全屏应用或前台焦点离开桌面满 5 秒自动暂停视频解码，触摸或键鼠操作瞬间无感恢复。 |
+
 ## 已知问题
 
-- **插电睡眠时电源键不直接唤醒，请用键盘或 USB 外设唤醒。** 本机 `H_EC` 与电源键 `PWRB` 共用 `GPE 0x6E`，充电期间 EC 会周期性拉高该中断；`-s0ixacnoecwake` 在插电入睡时自动屏蔽 `PWRB` 的 S0 唤醒能力以防止充电脉冲误亮屏，敲击键盘、移动外接鼠标或插拔磁吸键盘/USB 外设即可唤醒。**拔电使用电池入睡时会自动恢复短按实体电源键唤醒。**
+- **低电量插电快充睡眠期间电源键临时屏蔽，充满稳态后自动恢复。** 本机 `H_EC` 与电源键 `PWRB` 共用 `GPE 0x6E`，低电量充电过程中 EC 会周期性拉高该中断；`-s0ixacnoecwake` 仅在充电进行中（`< 94%` 或有充电电流）屏蔽 `GPE 0x6E` 唤醒（此时可用键盘/鼠标/USB 外设唤醒），**一旦充满进入零电流稳态或拔电使用电池，会自动恢复短按实体电源键唤醒与拔插充电器唤醒。**
 - **长时睡眠唤醒后 Wi-Fi 约需 25–35 秒自动重连。** 短时睡眠唤醒后 Wi-Fi 通常数秒内恢复；经历数小时平台 S0ix 深睡唤醒后，`AirportItlwm` 重新初始化 AX201 固件并完成 WPA2 关联约需 25–35 秒。
 - **高负载视频壁纸与远程桌面截屏叠加偶发 GPU 重启。** 动态壁纸（WebKit 播放视频）与远程桌面截屏同时运行时，早期版本出现过 `GPURestart` → `WindowServer` 看门狗超时。日常避免两者长时间叠加运行。
 - **触摸驱动极低概率空指针 panic**：VoodooI2C 在 `forwardReport` 中读 `IOFBTransform` 时没有判空，很少触发。
@@ -125,7 +135,7 @@ patches/S0ixStandby/      S0ixStandby 0.5.4（-s0ixacnoecwake）补丁、构建�
 src/XSHIDDLog/            XSHIDDLog.kext 源码
 scripts/fetch-thirdparty.sh  下载并校验第三方组件，补齐 EFI
 thirdparty.lock           第三方发布包的 URL / SHA-256，以及每个文件的来源
-EFI-sha256.txt            v2.0 EFI 中全部 64 个文件的 SHA-256（config.plist 除外）
+EFI-sha256.txt            v2.0.1 EFI 中全部 66 个文件的 SHA-256（config.plist 除外）
 tools/                    实用工具（tools/s0ix 确定性 U 盘构建与 DSDT 校验、电源键面板、USB/手写笔/电池工具）
 docs/                     硬件信息、各子系统调查记录与 S0ix 路线图
 CHANGELOG.md              各次突破的问题、思路和改动
@@ -140,8 +150,8 @@ THIRD_PARTY.md            第三方组件、版本和许可证
    scripts/fetch-thirdparty.sh
    ```
 
-   脚本从各项目的 GitHub 发布页下载 14 个固定版本的发布包，逐个校验 SHA-256，取出 44 个文件放进 `EFI/`，
-   最后按 `EFI-sha256.txt` 校验 EFI 里全部 64 个文件。通过后得到的 EFI 与作者实机使用的 **v2.0** 逐字节一致
+   脚本从各项目的 GitHub 发布页下载 14 个固定版本的发布包，逐个校验 SHA-256，取出 46 个文件放进 `EFI/`，
+   最后按 `EFI-sha256.txt` 校验 EFI 里全部 66 个文件。通过后得到的 EFI 与作者实机使用的 **v2.0.1** 逐字节一致
    （`config.plist` 除外）。Linux 和 macOS 都能运行。
 
 2. **生成自己的 SMBIOS。** 用 [GenSMBIOS](https://github.com/corpnewt/GenSMBIOS) 生成 `MacBookPro16,2`
@@ -176,7 +186,7 @@ THIRD_PARTY.md            第三方组件、版本和许可证
 | `-s0ixgpureset` | S0ixStandby：S0ix 唤醒瞬间执行 Tiger Lake GT 硬件复位（`GEN11_GDRST`） |
 | `-s0ixrefclk -s0ixd3` | S0ixStandby：睡眠期间释放 PCIe 参考时钟并将无驱动 PCI 设备（ISH、TBT DMA、LPSS、DPTF 等）切入 `D3hot`，解除 `SLP_S0` 阻塞进入 `PC8` 深睡 |
 | `-s0ixacnortc` | S0ixStandby：插电无用户显式定时任务时抑制系统自动维护型 RTC 唤醒 |
-| `-s0ixacnoecwake` | 本项目 S0ixStandby 补丁：插电睡眠自动屏蔽 `PWRB` 共享 `GPE 0x6E` 充电脉冲唤醒，拔电自动恢复电池电源键唤醒 |
+| `-s0ixacnoecwake` | 本项目 S0ixStandby 补丁：插电快充期间临时屏蔽 `PWRB` 共享 `GPE 0x6E` 防充电脉冲唤醒，充满稳态或电池模式下自动恢复实体电源键与拔插充电器唤醒 |
 | `-v keepsyms=1 debug=0x100` | 调试符号与详细引导输出，稳定后可按需精简 |
 
 ### ACPI

@@ -18,6 +18,7 @@ __pycache__/
 /EFI/OC/Kexts/Lilu.kext/
 /EFI/OC/Kexts/NVMeFix.kext/
 /EFI/OC/Kexts/SMCBatteryManager.kext/
+/EFI/OC/Kexts/SMCProcessor.kext/
 /EFI/OC/Kexts/USBToolBox.kext/
 /EFI/OC/Kexts/VirtualSMC.kext/
 /EFI/OC/Kexts/VoodooI2C.kext/Contents/MacOS/VoodooI2C
