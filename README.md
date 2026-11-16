@@ -72,6 +72,10 @@ i7-1165G7 / Iris Xe 二合一平板电脑上的 macOS Sequoia OpenCore EFI、ACP
 | **[ScreenBoard](https://github.com/Akariayumu/ScreenBoard-for-Mac)** | 仿 Win11 触摸屏幕键盘 | 专为拆下磁吸键盘后的纯平板触控模式打造。浮动面板不抢当前窗口输入焦点，支持底部铺满停靠、自由浮动与左右分体拇指布局；虚拟键码直通系统原生拼音输入法，支持长按备选符号、按词删改移动与点按文本框自动弹出。 |
 | **[Wallpaper4Mac](https://github.com/Akariayumu/Wallpaper4Mac)** | 低功耗动态视频壁纸 | 原生菜单栏管理端 + 静音硬解播放内核 + `hevc_videotoolbox` 硬件转码脚本。针对本机功耗与窗口看门狗做了激进省电联动：关屏、S0ix 睡眠、切电池供电、全屏应用或前台焦点离开桌面满 5 秒自动暂停视频解码，触摸或键鼠操作瞬间无感恢复。 |
 
+| [Xmonitor](https://github.com/Akariayumu/Xmonitor)（菜单栏 · 桌面组件 · S0ix 控制台） | [ScreenBoard](https://github.com/Akariayumu/ScreenBoard-for-Mac)（平板触控分体屏幕键盘） | [Wallpaper4Mac](https://github.com/Akariayumu/Wallpaper4Mac)（智能暂停低功耗动态壁纸） |
+| :---: | :---: | :---: |
+| ![Xmonitor 预览](docs/screenshots/xmonitor-showcase.png) | ![ScreenBoard 分体键盘预览](docs/screenshots/screenboard-split.png) | ![Wallpaper4Mac 动态壁纸预览](docs/screenshots/wallpaper4mac-showcase.png) |
+
 ## 已知问题
 
 - **低电量插电快充睡眠期间电源键临时屏蔽，充满稳态后自动恢复。** 本机 `H_EC` 与电源键 `PWRB` 共用 `GPE 0x6E`，低电量充电过程中 EC 会周期性拉高该中断；`-s0ixacnoecwake` 仅在充电进行中（`< 94%` 或有充电电流）屏蔽 `GPE 0x6E` 唤醒（此时可用键盘/鼠标/USB 外设唤醒），**一旦充满进入零电流稳态或拔电使用电池，会自动恢复短按实体电源键唤醒与拔插充电器唤醒。**
