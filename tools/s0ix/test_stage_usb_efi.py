@@ -459,6 +459,25 @@ class StageUsbEfiTests(unittest.TestCase):
         self.assertIs(upgraded["Kernel"]["Add"][2]["Enabled"], True)
         self.assertEqual(upgraded, mod.transform_config_plist(upgraded, phase=4))
 
+    def test_s0ixstandby_v2_patch_gen12_uncore_and_fw_gt_semantics(self) -> None:
+        v2_patch_path = REPO_ROOT / "patches" / "S0ixStandby" / "s0ixstandby-0.5.4-xstation-v2.patch"
+        self.assertTrue(v2_patch_path.is_file())
+        patch_text = v2_patch_path.read_text(encoding="utf-8")
+
+        # Must gate GEN12_RPSTAT1 (0x1381B4) on hardware GEN6_GT_CORE_STATUS (0x138060, bits 2:0 < 3),
+        # never on CPU software FORCEWAKE_RENDER_ACK (0x00D84).
+        self.assertIn("kGen6GtCoreStatus = 0x138060", patch_text)
+        self.assertIn("(coreStatus & 0x7) < 3", patch_text)
+        self.assertIn("kGen12Rpstat1     = 0x1381B4", patch_text)
+
+        refresh_idx = patch_text.index("IOReturn S0ixStandby::refreshGpuFreq()")
+        refresh_body = patch_text[refresh_idx:]
+        self.assertNotIn("kFwRenderAck", refresh_body)
+        self.assertIn("cmd != 0xFFFF", refresh_body)
+        self.assertIn("gpuRead(kFwGtAck)", refresh_body)
+        self.assertIn("gpuRead(kGen6Rpnswreq)", refresh_body)
+        self.assertIn("reqMHz = actualMHz;", refresh_body)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,17 +1,18 @@
 diff --git a/S0ixStandby/S0ixGPU.cpp b/S0ixStandby/S0ixGPU.cpp
-index 70a3742..ccab195 100644
+index 70a3742..967b816 100644
 --- a/S0ixStandby/S0ixGPU.cpp
 +++ b/S0ixStandby/S0ixGPU.cpp
-@@ -44,6 +44,8 @@
+@@ -44,6 +44,9 @@
  static const uint32_t kRCS = 0x02000, kBCS = 0x22000;    // engine MMIO bases
  static const uint32_t kFwRenderReq = 0x0A278, kFwRenderAck = 0x00D84;   // FORCEWAKE_RENDER_GEN9
  static const uint32_t kFwGtReq     = 0x0A188, kFwGtAck     = 0x130044;  // FORCEWAKE_GT_GEN9
-+static const uint32_t kGen6Rpnswreq = 0x0A008;           // GEN6_RPNSWREQ (bits 31:23 = req ratio)
-+static const uint32_t kGen12Rpstat1 = 0x1381B4;          // GEN12_RPSTAT1 (bits 19:11 = CAGF)
++static const uint32_t kGen6Rpnswreq     = 0x0A008;       // GEN6_RPNSWREQ (FORCEWAKE_GT, bits 31:23 = req ratio)
++static const uint32_t kGen6GtCoreStatus = 0x138060;      // GEN6_GT_CORE_STATUS (uncore mirror, bits 2:0: 0=RC0, 3=RC6, 4=RC7)
++static const uint32_t kGen12Rpstat1     = 0x1381B4;      // GEN12_RPSTAT1 (uncore mirror, bits 19:11 = CAGF)
  static const uint32_t kGDRST = 0x0941C;                  // GEN6_GDRST
  static const uint32_t kGrdomFull = 1u << 0;              // GEN11_GRDOM_FULL
  static const uint32_t kResetCtl = 0xD0;                  // RING_RESET_CTL (engine relative)
-@@ -222,17 +224,24 @@ bool S0ixStandby::setupGPU()
+@@ -222,17 +225,24 @@ bool S0ixStandby::setupGPU()
  	found->findPCICapability(kIOPCIPowerManagementCapability, &pm);
  
  	cleanNvram();
@@ -37,14 +38,19 @@ index 70a3742..ccab195 100644
  
  	char buf[128];
  	uint32_t id = found->configRead32(kIOPCIConfigVendorID);
-@@ -584,3 +593,43 @@ void S0ixStandby::publishDisplay()
+@@ -584,3 +594,55 @@ void S0ixStandby::publishDisplay()
  		}
  	}
  }
 +
 +// --- On-demand Gen12 GPU frequency export (read-only, zero-forcewake) --------
 +// Triggered from user space via IORegistryEntrySetCFProperties({"refreshGpuFreq": true}).
-+// Never writes PCI config space or MMIO forcewake registers.
++// Never writes PCI config space or MMIO forcewake registers:
++//   - 0x138060 (GEN6_GT_CORE_STATUS) and 0x1381B4 (GEN12_RPSTAT1) lie in the
++//     always-on uncore/PCU mirror range (0x40000..0x1bffff, FORCEWAKE_NONE).
++//   - 0x0A008 (GEN6_RPNSWREQ) lies in FORCEWAKE_GT (0x9800..0xafff), so it is
++//     only read when 0x130044 (FORCEWAKE_GT_ACK) already has an active lease;
++//     otherwise Requested MHz falls back to Current MHz.
 +
 +IOReturn S0ixStandby::refreshGpuFreq()
 +{
@@ -60,18 +66,25 @@ index 70a3742..ccab195 100644
 +	if (!gpuSleeping) {
 +		uint16_t pmcsr = gpuPmCap ? gpuDev->configRead16(gpuPmCap + kPmcsrOff) : 0;
 +		uint16_t cmd = gpuDev->configRead16(kIOPCIConfigCommand);
-+		if ((pmcsr & 3) == 0 && (cmd & kIOPCICommandMemorySpace) != 0) {
-+			uint32_t ack = gpuRead(kFwRenderAck);
-+			if (ack != 0xFFFFFFFF && (ack & 0xFFFF) != 0) {
++		if ((pmcsr & 3) == 0 && cmd != 0xFFFF && (cmd & kIOPCICommandMemorySpace) != 0) {
++			uint32_t coreStatus = gpuRead(kGen6GtCoreStatus);
++			if (coreStatus != 0xFFFFFFFF && (coreStatus & 0x7) < 3) {
 +				uint32_t rpstat1 = gpuRead(kGen12Rpstat1);
 +				if (rpstat1 != 0xFFFFFFFF) {
 +					uint32_t cagf = (rpstat1 >> 11) & 0x1FF;
 +					actualMHz = (cagf * 50 + 1) / 3;
 +				}
-+				uint32_t rpnswreq = gpuRead(kGen6Rpnswreq);
-+				if (rpnswreq != 0xFFFFFFFF) {
-+					uint32_t req = (rpnswreq >> 23) & 0x1FF;
-+					reqMHz = (req * 50 + 1) / 3;
++				if (actualMHz > 0) {
++					uint32_t gtAck = gpuRead(kFwGtAck);
++					if (gtAck != 0xFFFFFFFF && (gtAck & 0xFFFF) != 0) {
++						uint32_t rpnswreq = gpuRead(kGen6Rpnswreq);
++						if (rpnswreq != 0xFFFFFFFF) {
++							uint32_t req = (rpnswreq >> 23) & 0x1FF;
++							reqMHz = (req * 50 + 1) / 3;
++						}
++					}
++					if (reqMHz == 0)
++						reqMHz = actualMHz;
 +				}
 +			}
 +		}

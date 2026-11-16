@@ -18,9 +18,9 @@ X-STATION V2 的嵌入式控制器 `H_EC` 与 ACPI 电源键 `\_SB.PWRB` 共用�
 
 - 在 `setupGPU()` 成功映射 Gen12 `gpuMMIO` 时初始化 IORegistry 属性 `"GPU Current Freq MHz" = 0` 与 `"GPU Requested Freq MHz" = 0`（`uint32` `OSNumber`），供用户态监控工具被动探测能力。
 - 重写 `S0ixStandby::setProperties(OSObject *properties)`：当用户态调用 `IORegistryEntrySetCFProperties(..., {"refreshGpuFreq": kCFBooleanTrue})`（免 `root`）时，在 `gpuFreqLock` 互斥保护与睡眠态守卫下：
-  1. 只读检查 PCI `PMCSR`（处于 `D0`）与 `kIOPCICommandMemorySpace`（已使能），**绝不改写 PCI Command 寄存器**；
-  2. 只读检查 `FORCEWAKE_RENDER_ACK`（`0x00D84`）：若 `(ack & 0xFFFF) == 0`（核显处于 `RC6` 休眠）或 `ack == 0xFFFFFFFF`，直接发布 `0 MHz`，**绝不触发任何 Forcewake 写入**；
-  3. 仅在核显处于活跃态时只读采样 `GEN12_RPSTAT1`（`0x1381B4`，`cagf = (v >> 11) & 0x1FF`，`actualMHz = (cagf * 50 + 1) / 3`）与 `GEN6_RPNSWREQ`（`0x0A008`，`req = (v >> 23) & 0x1FF`，`reqMHz = (req * 50 + 1) / 3`），更新 `"GPU Current Freq MHz"` 与 `"GPU Requested Freq MHz"`。
+  1. 只读检查 PCI `PMCSR`（处于 `D0`）与 `cmd != 0xFFFF && (cmd & kIOPCICommandMemorySpace)`（已使能），**绝不改写 PCI Command 寄存器**；
+  2. 在常驻 Uncore 镜像区间（`0x40000..0x1bffff`，无需任何 Forcewake 且绝不唤醒 `RC6`）只读检查硬件核心状态 `GEN6_GT_CORE_STATUS`（`0x138060`）：若 `coreStatus == 0xFFFFFFFF` 或 `(coreStatus & 0x7) >= 3`（硬件处于 `RC6=3` / `RC7=4` 深度休眠），直接发布 `0 MHz`，**绝不触发任何 Forcewake 写入**；
+  3. 当硬件处于活跃态（`(coreStatus & 0x7) < 3`）时，只读采样 Uncore 镜像 `GEN12_RPSTAT1`（`0x1381B4`，`cagf = (v >> 11) & 0x1FF`，`actualMHz = (cagf * 50 + 1) / 3`）；对于位于 `FORCEWAKE_GT` 电源域（`0x9800..0xafff`）的 `GEN6_RPNSWREQ`（`0x0A008`），仅当常驻寄存器 `FORCEWAKE_GT_ACK`（`0x130044`）已有活跃软件租约（`(gtAck & 0xFFFF) != 0`）时才只读采样（`req = (v >> 23) & 0x1FF`），否则当 `actualMHz > 0` 时安全回退 `reqMHz = actualMHz`，最终更新 `"GPU Current Freq MHz"` 与 `"GPU Requested Freq MHz"`。
 
 ## 常用启动参数
 
