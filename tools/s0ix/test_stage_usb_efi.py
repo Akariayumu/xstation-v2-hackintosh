@@ -478,6 +478,17 @@ class StageUsbEfiTests(unittest.TestCase):
         self.assertIn("gpuRead(kGen6Rpnswreq)", refresh_body)
         self.assertIn("reqMHz = actualMHz;", refresh_body)
 
+    def test_s0ixstandby_v2_patch_ac_charging_only_ec_wake_policy(self) -> None:
+        v2_patch_path = REPO_ROOT / "patches" / "S0ixStandby" / "s0ixstandby-0.5.4-xstation-v2.patch"
+        patch_text = v2_patch_path.read_text(encoding="utf-8")
+
+        # Must only disable shared EC GPE 0x6E wake while actively charging on AC,
+        # re-enabling once charged/idle on AC or when on battery.
+        self.assertIn("bool wantEnable = !(onAC && acCharging);", patch_text)
+        self.assertIn("belowStopThreshold = (maxCap > 0 && curCap * 100ULL < maxCap * 94ULL)", patch_text)
+        self.assertIn("hasChargeFlow = (instAmp > 0 || avgAmp > 0)", patch_text)
+        self.assertIn('"on AC (charging)" : "on AC (charged)"', patch_text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -95,19 +95,20 @@ index 70a3742..967b816 100644
 +	return kIOReturnSuccess;
 +}
 diff --git a/S0ixStandby/S0ixStandby.cpp b/S0ixStandby/S0ixStandby.cpp
-index 70b6d13..af6dbcf 100644
+index 70b6d13..263de69 100644
 --- a/S0ixStandby/S0ixStandby.cpp
 +++ b/S0ixStandby/S0ixStandby.cpp
-@@ -31,6 +31,8 @@
+@@ -31,6 +31,9 @@
  //                          restore on wake (experimental)
  //              -s0ixgpuprobe  also probe an idle GPU (canary) and keep the last
  //                          result in NVRAM (s0ix-gpu-last); for debugging
 +//              -s0ixacnoecwake  disable S0 wake on ACPI devices sharing the EC
-+//                          GPE while on AC, restoring wake capability on battery
++//                          GPE while actively charging on AC, restoring wake
++//                          capability once charged/idle or on battery
  //              s0ixfn=N    bitmask of _DSM functions allowed to run, e.g.
  //                          s0ixfn=0x18 = display off/on only (3,4),
  //                          s0ixfn=0x60 = entry/exit only (5,6). Default: all.
-@@ -307,6 +309,7 @@ bool S0ixStandby::start(IOService *provider)
+@@ -307,6 +310,7 @@ bool S0ixStandby::start(IOService *provider)
  	wifiPM = bootArg("-s0ixwifipm");
  	refclkWA = bootArg("-s0ixrefclk");
  	acNoRtc = bootArg("-s0ixacnortc");
@@ -115,7 +116,7 @@ index 70b6d13..af6dbcf 100644
  	ecWake = bootArg("-s0ixecwake");
  	uint32_t fn = 0;
  	if (PE_parse_boot_argn("s0ixfn", &fn, sizeof(fn)))
-@@ -396,18 +399,42 @@ bool S0ixStandby::start(IOService *provider)
+@@ -396,18 +400,42 @@ bool S0ixStandby::start(IOService *provider)
  		setProperty("Wi-Fi PCI PM", "pending (set up 30 s after boot)");
  	}
  
@@ -165,7 +166,7 @@ index 70b6d13..af6dbcf 100644
  
  	if (workLoop) {
  		battTimer = IOTimerEventSource::timerEventSource(this, &S0ixStandby::battTimerFired);
-@@ -417,6 +444,8 @@ bool S0ixStandby::start(IOService *provider)
+@@ -417,6 +445,8 @@ bool S0ixStandby::start(IOService *provider)
  		setProperty("Battery full state", "pending (first check 30 s after boot)");
  	}
  
@@ -174,7 +175,7 @@ index 70b6d13..af6dbcf 100644
  	if ((gpuProbe || gpuReset) && !setupGPU() && gpuTries < 100 && workLoop) {
  		// The iGPU nub may not be published yet this early: retry.
  		gpuTimer = IOTimerEventSource::timerEventSource(this, &S0ixStandby::gpuTimerFired);
-@@ -488,6 +517,29 @@ void S0ixStandby::stop(IOService *provider)
+@@ -488,6 +518,29 @@ void S0ixStandby::stop(IOService *provider)
  		battTimer->cancelTimeout();
  		if (workLoop) workLoop->removeEventSource(battTimer);
  	}
@@ -204,7 +205,7 @@ index 70b6d13..af6dbcf 100644
  	IOService::stop(provider);
  }
  
-@@ -506,9 +558,13 @@ void S0ixStandby::free()
+@@ -506,9 +559,13 @@ void S0ixStandby::free()
  	OSSafeReleaseNULL(acTimer);
  	OSSafeReleaseNULL(battTimer);
  	OSSafeReleaseNULL(workLoop);
@@ -218,7 +219,7 @@ index 70b6d13..af6dbcf 100644
  	for (uint32_t i = 0; i < d3Count; i++) OSSafeReleaseNULL(d3Dev[i]);
  	d3Count = 0;
  	if (d3Lock) { IOLockFree(d3Lock); d3Lock = nullptr; }
-@@ -522,6 +578,15 @@ void S0ixStandby::free()
+@@ -522,6 +579,15 @@ void S0ixStandby::free()
  	IOService::free();
  }
  
@@ -234,21 +235,46 @@ index 70b6d13..af6dbcf 100644
  // ---------------------------------------------------------------------------
  // LPS0 _DSM
  // ---------------------------------------------------------------------------
-@@ -1208,24 +1273,181 @@ void S0ixStandby::publishWakeInfo()
+@@ -1208,24 +1274,209 @@ void S0ixStandby::publishWakeInfo()
  void S0ixStandby::updateAC()
  {
  	bool ac = false;
++	bool activeChg = false;
 +	bool seen = false;
  	if (OSDictionary *match = serviceMatching("IOPMPowerSource")) {
  		if (OSIterator *it = getMatchingServices(match)) {
 -			while (OSObject *o = it->getNextObject())
 -				if (IOService *ps = OSDynamicCast(IOService, o))
 -					if (OSBoolean *b = OSDynamicCast(OSBoolean, ps->getProperty("ExternalConnected")))
+-						if (b->isTrue()) ac = true;
 +			while (OSObject *o = it->getNextObject()) {
 +				if (IOService *ps = OSDynamicCast(IOService, o)) {
 +					if (OSBoolean *b = OSDynamicCast(OSBoolean, ps->getProperty("ExternalConnected"))) {
 +						seen = true;
- 						if (b->isTrue()) ac = true;
++						if (b->isTrue()) {
++							ac = true;
++							bool chg = false, full = false;
++							if (OSBoolean *cb = OSDynamicCast(OSBoolean, ps->getProperty("IsCharging")))
++								chg = cb->isTrue();
++							if (OSBoolean *fb = OSDynamicCast(OSBoolean, ps->getProperty("FullyCharged")))
++								full = fb->isTrue();
++							uint64_t curCap = 0, maxCap = 0;
++							if (OSNumber *cn = OSDynamicCast(OSNumber, ps->getProperty("CurrentCapacity")))
++								curCap = cn->unsigned64BitValue();
++							if (OSNumber *mn = OSDynamicCast(OSNumber, ps->getProperty("MaxCapacity")))
++								maxCap = mn->unsigned64BitValue();
++							int64_t instAmp = 0, avgAmp = 0;
++							if (OSNumber *in = OSDynamicCast(OSNumber, ps->getProperty("InstantAmperage")))
++								instAmp = static_cast<int64_t>(in->unsigned64BitValue());
++							if (OSNumber *an = OSDynamicCast(OSNumber, ps->getProperty("Amperage")))
++								avgAmp = static_cast<int64_t>(an->unsigned64BitValue());
++							if (chg && !full) {
++								bool belowStopThreshold = (maxCap > 0 && curCap * 100ULL < maxCap * 94ULL);
++								bool hasChargeFlow = (instAmp > 0 || avgAmp > 0);
++								if (belowStopThreshold || hasChargeFlow || maxCap == 0)
++									activeChg = true;
++							}
++						}
 +					}
 +				}
 +			}
@@ -260,6 +286,7 @@ index 70b6d13..af6dbcf 100644
 +	if (seen) {
 +		psSeen = true;
 +		onAC = ac;
++		acCharging = activeChg;
 +	}
 +}
 +
@@ -333,8 +360,10 @@ index 70b6d13..af6dbcf 100644
 +	} else if (!psSeen || !appliedValid) {
 +		snprintf(buf, sizeof(buf), "pending: waiting for IOPMPowerSource (%s, GPE 0x%x)", names, ecGpe);
 +	} else {
++		const char *modeStr = !onAC ? "on battery"
++		                            : (acCharging ? "on AC (charging)" : "on AC (charged)");
 +		snprintf(buf, sizeof(buf), "%s: %s (GPE 0x%x) wake %s",
-+		         onAC ? "on AC" : "on battery", names, ecGpe,
++		         modeStr, names, ecGpe,
 +		         appliedEnable ? "enabled" : "disabled");
 +	}
 +	setProperty("AC EC wake block", buf);
@@ -345,6 +374,7 @@ index 70b6d13..af6dbcf 100644
 +{
 +	bool prevSeen = psSeen;
 +	bool prevAC = onAC;
++	bool prevCharging = acCharging;
 +	if (updateRegistry) {
 +		updateAC();
 +		if (acNoEcWake && ecWakeDevCount == 0) {
@@ -359,7 +389,7 @@ index 70b6d13..af6dbcf 100644
 +
 +	bool changed = false;
 +	if (psSeen) {
-+		bool wantEnable = !onAC;
++		bool wantEnable = !(onAC && acCharging);
 +		if (acWakeLock) IOLockLock(acWakeLock);
 +		if (ecWakeDevCount > 0 && (!ecWakeAppliedValid || ecWakeAppliedEnable != wantEnable || !updateRegistry)) {
 +			changed = (!ecWakeAppliedValid || ecWakeAppliedEnable != wantEnable);
@@ -375,7 +405,7 @@ index 70b6d13..af6dbcf 100644
 +
 +	if (updateRegistry) {
 +		publishAcEcWake();
-+		if (psSeen && (!prevSeen || prevAC != onAC || changed))
++		if (psSeen && (!prevSeen || prevAC != onAC || prevCharging != acCharging || changed))
 +			battCheck();
 +		if (changed) {
 +			if (OSString *s = OSDynamicCast(OSString, getProperty("AC EC wake block")))
@@ -422,7 +452,23 @@ index 70b6d13..af6dbcf 100644
  	}
  }
  
-@@ -1308,6 +1530,8 @@ void S0ixStandby::battTimerFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -1263,9 +1514,13 @@ void S0ixStandby::battCheck()
+ 				if (!psNum(ps, "CurrentCapacity", cur) || !psNum(ps, "MaxCapacity", max) || !max) continue;
+ 				psBool(ps, "IsCharging", chg);
+ 				psBool(ps, "FullyCharged", full);
++				uint64_t rawInst = 0, rawAvg = 0;
++				int64_t instAmp = psNum(ps, "InstantAmperage", rawInst) ? static_cast<int64_t>(rawInst) : 0;
++				int64_t avgAmp  = psNum(ps, "Amperage", rawAvg) ? static_cast<int64_t>(rawAvg) : 0;
++				bool activeChg = chg && !full && ((cur * 100ULL < max * 94ULL) || instAmp > 0 || avgAmp > 0);
+ 				if (!ext) state = kBattery;
+-				else if (chg) state = kCharging;
+-				else if (full) state = kFull;
++				else if (activeChg) state = kCharging;
++				else if (full || (chg && cur * 100ULL >= max * 94ULL && instAmp <= 0 && avgAmp <= 0)) state = kFull;
+ 				else if (cur < max && cur * 100 >= max * 97) state = kStuck;
+ 				else state = kNotFull;
+ 				break;
+@@ -1308,6 +1563,8 @@ void S0ixStandby::battTimerFired(OSObject *owner, IOTimerEventSource *sender)
  			self->findEcGpe();
  			if (self->ecGpe != 0xFFFFFFFF) self->publishEcWake();
  		}
@@ -431,7 +477,7 @@ index 70b6d13..af6dbcf 100644
  		self->publishLog();
  		sender->setTimeoutMS(60000);
  	}
-@@ -1325,8 +1549,16 @@ void S0ixStandby::onSleep()
+@@ -1325,8 +1582,16 @@ void S0ixStandby::onSleep()
  	timeAtSleep = mach_absolute_time();
  	if (cstateMask) { readCStates(csAtSleep); tscAtSleep = rdtsc(); e2AtSleep = rdmsr(kMsrPkgCstConfig); }
  
@@ -449,7 +495,7 @@ index 70b6d13..af6dbcf 100644
  	if (gpuMMIO) {
  		gpuSleep();
  		dispCapture(dispAtSleep, nullptr);
-@@ -1388,6 +1620,11 @@ void S0ixStandby::onWake()
+@@ -1388,6 +1653,11 @@ void S0ixStandby::onWake()
  		if (refclkWA) refclkWake();
  		gpuWake();
  	}
@@ -461,7 +507,7 @@ index 70b6d13..af6dbcf 100644
  	wifiPmcsrWake = wifiDev ? wifiDev->configRead16(wifiPmCap + 4) : 0xFFFF;
  	counterAtWake = 0;
  	readCounter(counterAtWake);
-@@ -1475,6 +1712,8 @@ void S0ixStandby::publish()
+@@ -1475,6 +1745,8 @@ void S0ixStandby::publish()
  		setProperty("AC RTC wake blocks", (unsigned long long)rtcBlockCount, 32);
  		setProperty("On AC (last check)", onAC);
  	}
@@ -471,7 +517,7 @@ index 70b6d13..af6dbcf 100644
  	setProperty("Last sleep type", (unsigned long long)snap.sleepType, 32);
  	setProperty("Last DSM entry/exit", snap.sleepType == kSleepTypeDeepIdle && dsmEnabled);
 diff --git a/S0ixStandby/S0ixStandby.hpp b/S0ixStandby/S0ixStandby.hpp
-index 06c299b..3a35a55 100644
+index 06c299b..d33afdd 100644
 --- a/S0ixStandby/S0ixStandby.hpp
 +++ b/S0ixStandby/S0ixStandby.hpp
 @@ -16,6 +16,7 @@
@@ -500,12 +546,12 @@ index 06c299b..3a35a55 100644
  	DispState dispAtSleep {}, dispAtWake {};
  	bool dispTgl {false};                    // Gen12 (TGL+) DMC debug counter layout
  	void dispCapture(DispState &d, const DispState *ref);
-@@ -228,12 +233,32 @@ private:
+@@ -228,12 +233,33 @@ private:
  	bool setupWifiPM();
  
  	// -s0ixacnortc: no RTC alarm wakes from Deep Idle while on AC
 -	bool acNoRtc {false}, onAC {false}, rtcBlocked {false};
-+	bool acNoRtc {false}, onAC {false}, psSeen {false}, rtcBlocked {false};
++	bool acNoRtc {false}, onAC {false}, acCharging {false}, psSeen {false}, rtcBlocked {false};
  	uint16_t pm1EnPort {0}, pm1EnSaved {0};
  	uint8_t cmosBSaved {0};
  	uint32_t rtcBlockCount {0};
@@ -513,7 +559,8 @@ index 06c299b..3a35a55 100644
  
 +	// -s0ixacnoecwake: disable ACPI wake capability on S0 wake devices whose
 +	// acpi-wake-s0-gpe matches the EC GPE (e.g. PWRB with PRW0 = GPE 0x6e)
-+	// while on AC, and re-enable on battery so power-button wake still works.
++	// only while actively charging on AC, re-enabling once full/idle or on battery
++	// so physical power-button and AC unplug/replug wakes work when charged.
 +	enum { kMaxEcWakeDevs = 4 };
 +	bool acNoEcWake {false};
 +	bool ecWakeAppliedValid {false}, ecWakeAppliedEnable {true};
