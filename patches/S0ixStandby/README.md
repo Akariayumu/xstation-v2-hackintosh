@@ -18,7 +18,7 @@ X-STATION V2 的嵌入式控制器 `H_EC` 与 ACPI 电源键 `\_SB.PWRB` 共用�
 |---|---|---|
 | `-s0ixgpureset` | 上游 0.5.4 | 唤醒时对 Tiger Lake GT 执行硬件 `GEN11_GDRST`（约 125–155 µs），避免核显从深睡恢复后渲染引擎卡死 |
 | `-s0ixrefclk` | 上游 0.5.4 | 睡眠期间允许关闭 PCIe 参考时钟，解除 PCH `SLP_S0` 阻塞 |
-| `-s0ixd3` | 上游 0.5.4 | 入睡前将 PCIe 外设（如 AX201 Wi-Fi）切入 `D3cold`，唤醒后恢复 `D0` |
+| `-s0ixd3` | 上游 0.5.4 | 入睡前将无驱动的 PCI 设备（ISH、TBT DMA、LPSS、DPTF 等）切入 `D3hot`，唤醒后恢复 `D0` |
 | `-s0ixacnortc` | 上游 0.5.4 | 插电且无用户态显式 `pmset schedule` 定时任务时，抑制 macOS 自动维护型 RTC 唤醒 |
 | `-s0ixacnoecwake` | 本项目补丁 | 插电时禁用 `PWRB` 的共享 `GPE 0x6E` S0 唤醒，拔电自动恢复电池电源键唤醒 |
 | `-s0ixdbg` | 上游 0.5.4 | 输出详细串口/内核调试日志（排障用，日常可省略） |

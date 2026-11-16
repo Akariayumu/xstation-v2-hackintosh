@@ -24,7 +24,7 @@
 - **问题**：Tiger Lake-UP3 主板在现代固件下没有可用的传统 S3 挂起路径，此前一旦触发系统睡眠就会 panic 或黑屏死机，只能靠 `SleepDisabled=1` 禁用睡眠；打通平台睡眠后，核显从深睡唤醒时 GT 引擎未复位会导致卡死，且纯电池模式下按实体电源键无法唤醒。
 - **思路**：
   1. 禁用残缺的 `_S3_`，为 `FADT` 打开 Low Power S0 Idle（`LPS0`），并在 Darwin 下暴露 Intel Power Engine Plugin（`\_SB.PEPD`，`PNP0D80`），让 XNU 走原生 `IOPMSystemSleepType = 7`（Deep Idle）路径。
-  2. 引入 `S0ixStandby 0.5.4` 驱动 `PEPD._DSM` 低功耗通知链：入睡前将 AX201 等 PCIe 外设切入 `D3cold`（`-s0ixd3`）并释放参考时钟（`-s0ixrefclk`）以解除 `SLP_S0` 阻塞；唤醒瞬间对 Tiger Lake GT 执行硬件 `GEN11_GDRST` 复位（`-s0ixgpureset`，耗时约 130 µs）。
+  2. 引入 `S0ixStandby 0.5.4` 驱动 `PEPD._DSM` 低功耗通知链：入睡前将无驱动的 PCI 端点（ISH、TBT DMA、LPSS、DPTF 等共 9 项）切入 `D3hot`（`-s0ixd3`）并释放参考时钟（`-s0ixrefclk`）以解除 `SLP_S0` 阻塞；唤醒瞬间对 Tiger Lake GT 执行硬件 `GEN11_GDRST` 复位（`-s0ixgpureset`，耗时约 130 µs）。
   3. 排查 DSDT 发现 `\_SB.PWRB` 在无 `_PRW` 时不会被 `AppleACPIPlatform` 注册进 S0 唤醒源；在 `SSDT-DEEPIDLE` 中仅对 Darwin 为 `PWRB` 补齐 `PRW0 = Package (2) { 0x6E, 0x04 }`，把 `GPE 0x6E` 接入电源键 S0 唤醒。
 - **改动**：
   - 加 `SSDT-DEEPIDLE`（`LPS0`、`LXEN`、`PEPD._STA`、`PWRB.PRW0`）及两条唯一 DSDT 补丁 `_S3_ → XS3_`（`0x06055`）、`PEPD._STA → XSTA`（`0x3B58D`）。

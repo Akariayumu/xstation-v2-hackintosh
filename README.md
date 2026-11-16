@@ -36,7 +36,7 @@ i7-1165G7 / Iris Xe 二合一平板电脑上的 macOS Sequoia OpenCore EFI、ACP
 | 键盘 / 音量键 | ✅ | VoodooPS2（只用 Keyboard 插件） | v0.1.42 |
 | 电源键 | ✅ | SSDT-PWRBEC + `PWRB.PRW0`；电池睡眠支持短按唤醒，亮屏短按弹关机面板配 `tools/powerkey` | v0.1.50 / v2.0 |
 | 扬声器 / 耳机 / 麦克风 | ✅ | AppleALC layout 19 + coef `0x10` 扬声器开关 | v0.1.44 |
-| Wi-Fi | ✅ | AirportItlwm（原生 Wi-Fi 菜单，睡眠期间进 `D3cold`） | v0.1.36 / v2.0 |
+| Wi-Fi | ✅ | AirportItlwm（原生 Wi-Fi 菜单，S0ix 唤醒后自动重连） | v0.1.36 / v2.0 |
 | 蓝牙 | 🟡 | 可用，登录前偶尔连不上 | v0.1.40 |
 | 电池 | ✅ | 电量与充电状态；SSDT-BATFULL 修正 EC 94% 停充时的满电判定 | v0.1.42 / v2.0 |
 | CPU 电源管理 | ✅ | XCPM + HWP，0.4–4.7 GHz；亮屏静置封装约 2.0 W，关屏空闲整机约 3.8 W（插座端） | — / v2.0 |
@@ -64,8 +64,8 @@ i7-1165G7 / Iris Xe 二合一平板电脑上的 macOS Sequoia OpenCore EFI、ACP
 
 ## 已知问题
 
-- **插电睡眠时电源键不直接唤醒，请用键盘或 USB 外设唤醒。** 本机 `H_EC` 与电源键 `PWRB` 共用 `GPE 0x6E`，充电期间 EC 会周期性拉高该中断；`-s0ixacnoecwake` 在插电入睡时自动屏蔽 `PWRB` 的 S0 唤醒能力以防止充电脉冲误亮屏，敲击键盘、移动外接鼠标，或先拔下充电线再短按电源键均可唤醒。**纯电池模式下会自动恢复短按实体电源键唤醒。**
-- **长时睡眠唤醒后 Wi-Fi 约需 25–35 秒自动重连。** `-s0ixd3` 在睡眠期间将 AX201 切入 `D3cold` 以释放 `SLP_S0` 进入 `PC8`；短时睡眠通常数秒内恢复，数小时睡眠唤醒后 `AirportItlwm` 重新初始化固件并完成 WPA2 关联约需 25–35 秒。
+- **插电睡眠时电源键不直接唤醒，请用键盘或 USB 外设唤醒。** 本机 `H_EC` 与电源键 `PWRB` 共用 `GPE 0x6E`，充电期间 EC 会周期性拉高该中断；`-s0ixacnoecwake` 在插电入睡时自动屏蔽 `PWRB` 的 S0 唤醒能力以防止充电脉冲误亮屏，敲击键盘、移动外接鼠标或插拔磁吸键盘/USB 外设即可唤醒。**拔电使用电池入睡时会自动恢复短按实体电源键唤醒。**
+- **长时睡眠唤醒后 Wi-Fi 约需 25–35 秒自动重连。** 短时睡眠唤醒后 Wi-Fi 通常数秒内恢复；经历数小时平台 S0ix 深睡唤醒后，`AirportItlwm` 重新初始化 AX201 固件并完成 WPA2 关联约需 25–35 秒。
 - **高负载视频壁纸与远程桌面截屏叠加偶发 GPU 重启。** 动态壁纸（WebKit 播放视频）与远程桌面截屏同时运行时，早期版本出现过 `GPURestart` → `WindowServer` 看门狗超时。日常避免两者长时间叠加运行。
 - **触摸驱动极低概率空指针 panic**：VoodooI2C 在 `forwardReport` 中读 `IOFBTransform` 时没有判空，很少触发。
 - **Photo Booth 打开预览即崩溃**，相机预览和录像请用 QuickTime。
@@ -174,7 +174,7 @@ THIRD_PARTY.md            第三方组件、版本和许可证
 | `-wex-no-panel-keep -wex-sink-rate-restore` | 本项目 WhateverXe 补丁：允许关屏与 `DC9` 期间面板断电，点亮训练前自动写回 DPCD `0x115` 速率表 |
 | `-nodisplaysleepDC6` | 仅在亮机单纯关屏时不进 `DC6`，系统睡眠仍正常进入更深的真 `DC9` |
 | `-s0ixgpureset` | S0ixStandby：S0ix 唤醒瞬间执行 Tiger Lake GT 硬件复位（`GEN11_GDRST`） |
-| `-s0ixrefclk -s0ixd3` | S0ixStandby：睡眠期间释放 PCIe 参考时钟并将外设切入 `D3cold`，打通 `PC8` 深睡 |
+| `-s0ixrefclk -s0ixd3` | S0ixStandby：睡眠期间释放 PCIe 参考时钟并将无驱动 PCI 设备（ISH、TBT DMA、LPSS、DPTF 等）切入 `D3hot`，解除 `SLP_S0` 阻塞进入 `PC8` 深睡 |
 | `-s0ixacnortc` | S0ixStandby：插电无用户显式定时任务时抑制系统自动维护型 RTC 唤醒 |
 | `-s0ixacnoecwake` | 本项目 S0ixStandby 补丁：插电睡眠自动屏蔽 `PWRB` 共享 `GPE 0x6E` 充电脉冲唤醒，拔电自动恢复电池电源键唤醒 |
 | `-v keepsyms=1 debug=0x100` | 调试符号与详细引导输出，稳定后可按需精简 |
