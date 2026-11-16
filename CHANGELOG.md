@@ -8,16 +8,16 @@
 
 ---
 
-## v2.0.1（11-17）CPU/核显传感器导出与插电满电电源键唤醒
+## v2.0.1（11-17）CPU/核显零唤醒损耗传感器导出与插电/电池分离休眠策略
 
-- **问题**：一是 macOS 用户态在 Tiger Lake 上无法直接读取 CPU 封装/核心温度与核显实时频率，若强行在内核做 `FORCEWAKE` 轮询又会破坏核显 `RC6` 省电；二是 `v2.0` 的 `-s0ixacnoecwake` 在插电状态下全程屏蔽共享 `GPE 0x6E`，导致平板未接外置 USB 键鼠时，充满电插着电源休眠也无法通过短按电源键或拔插充电器唤醒。
+- **问题**：一是 macOS 用户态在 Tiger Lake 上无法直接读取 CPU 封装/核心温度与核显实时频率，若强行在内核做 `FORCEWAKE` 轮询又会破坏核显 `RC6` 省电；二是实测发现即便电量已达 `100%`（`Amperage = 0`），本机原厂 EC 在插电浮充态下每隔 55–84 秒仍会拉高共享 `GPE 0x6E` 上报状态，若在插电满电时放开 `PWRB` 的 `GPE 0x6E` S0 唤醒会导致休眠约一分钟后自动误亮屏。
 - **思路**：
   1. 启用 `SMCProcessor.kext` 导出 CPU 温度；在 `S0ixStandby` 中新增按需只读入口 `setProperties({"refreshGpuFreq": true})`，仅通过常驻 Uncore 镜像寄存器 `0x138060`（`GEN6_GT_CORE_STATUS`）与 `0x1381B4`（`GEN12_RPSTAT1`）读取活跃态核显频率，硬件处于 `RC6/RC7` 时直接返回 `0 MHz`，全程零 `FORCEWAKE` 写入。
-  2. 实测确认 EC 仅在 `< 94%` 或存在正向充电电流时周期性拉高 `GPE 0x6E`，充满进入零电流稳态后完全静默。将 `-s0ixacnoecwake` 细化为仅在充电进行中屏蔽 `GPE 0x6E`，一旦充满稳态（`on AC (charged)`）或切回电池模式即自动恢复 `PWRB` 唤醒能力。
+  2. 保持 `-s0ixacnoecwake` 在插电态（`onAC`）一律屏蔽 `GPE 0x6E` S0 唤醒、离电态（`on battery`）自动恢复电源键唤醒；同时将系统 `pmset` 配置为插电仅关屏（`pmset -c sleep 0 displaysleep 5`）+ 电池进 S0ix 深睡（`pmset -b sleep 5 displaysleep 5`），兼顾插电关屏零误醒/电源键与触屏秒亮、以及离电 S0ix 深睡省电。
 - **改动**：
   - `config.plist` 与 `thirdparty.lock` 启用 `SMCProcessor.kext`（1.3.8）。
   - 升级 `patches/S0ixStandby/s0ixstandby-0.5.4-xstation-v2.patch` 并重新构建 `S0ixStandby.kext`，更新 66 项 `EFI-sha256.txt`。
-- **结果**：配合 [Xmonitor](https://github.com/Akariayumu/Xmonitor) 可免 `root` 实时读取 CPU 温度与零唤醒损耗的核显 MHz（空闲 `RC6 = 99.9%+`）；插电充满休眠后可直接按实体电源键或拔插充电器唤醒。
+- **结果**：配合 [Xmonitor](https://github.com/Akariayumu/Xmonitor) 可免 `root` 实时读取 CPU 温度与零唤醒损耗的核显 MHz（空闲 `RC6 = 99.9%+`）；插电闲置关屏稳定安静且支持电源键/触屏秒亮，拔电自动启用 S0ix 深睡与电源键唤醒。
 
 ## v2.0（11-16）插电整晚睡眠与 94% 满电阈值修复
 

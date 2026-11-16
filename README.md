@@ -78,7 +78,7 @@ i7-1165G7 / Iris Xe 二合一平板电脑上的 macOS Sequoia OpenCore EFI、ACP
 
 ## 已知问题
 
-- **低电量插电快充睡眠期间电源键临时屏蔽，充满稳态后自动恢复。** 本机 `H_EC` 与电源键 `PWRB` 共用 `GPE 0x6E`，低电量充电过程中 EC 会周期性拉高该中断；`-s0ixacnoecwake` 仅在充电进行中（`< 94%` 或有充电电流）屏蔽 `GPE 0x6E` 唤醒（此时可用键盘/鼠标/USB 外设唤醒），**一旦充满进入零电流稳态或拔电使用电池，会自动恢复短按实体电源键唤醒与拔插充电器唤醒。**
+- **插电与电池采用分离睡眠策略（推荐 `pmset -c sleep 0`）。** 本机 `H_EC` 电池/Type-C PD 心跳与电源键 `PWRB` 共用 `GPE 0x6E`，即使充满至 100% 插电状态下 EC 仍会每分钟周期性触发一次 `GPE 0x6E`：因此 `-s0ixacnoecwake` 在插电时全程屏蔽 `GPE 0x6E` S0 唤醒防误亮屏（此时若手动进入系统深睡，需用蓝牙键鼠/触控板或插拔 USB 唤醒）。日常推荐插电设为仅关屏（`pmset -c sleep 0 displaysleep 5`，关屏功耗仅 `~3.8 W`，支持电源键与触摸屏 0.1 秒亮屏），电池模式设为自动进入 S0ix Deep Idle（`pmset -b sleep 5 displaysleep 5`，自动恢复实体电源键唤醒）。
 - **长时睡眠唤醒后 Wi-Fi 约需 25–35 秒自动重连。** 短时睡眠唤醒后 Wi-Fi 通常数秒内恢复；经历数小时平台 S0ix 深睡唤醒后，`AirportItlwm` 重新初始化 AX201 固件并完成 WPA2 关联约需 25–35 秒。
 - **高负载视频壁纸与远程桌面截屏叠加偶发 GPU 重启。** 动态壁纸（WebKit 播放视频）与远程桌面截屏同时运行时，早期版本出现过 `GPURestart` → `WindowServer` 看门狗超时。日常避免两者长时间叠加运行。
 - **触摸驱动极低概率空指针 panic**：VoodooI2C 在 `forwardReport` 中读 `IOFBTransform` 时没有判空，很少触发。
@@ -170,10 +170,12 @@ THIRD_PARTY.md            第三方组件、版本和许可证
    [WhateverXe Graphics](https://github.com/b00t0x/WhateverXe-Graphics) 的说明安装 **v0.4.4** 图形包（装进系统，不在 EFI 里）。
    SIP 已按要求设为 `0x803`。
 
-6. **配置 `pmset` 睡眠参数（尤其是从 `v1` 升级时）。** 若此前按 `v0.1.55` 禁用过睡眠，进入系统后执行一次：
+6. **配置 `pmset` 睡眠参数（插电仅关屏 + 电池 S0ix 深睡）。** 进入系统后执行一次：
 
    ```bash
    sudo pmset -a disablesleep 0 hibernatemode 0 standby 0 autopoweroff 0 powernap 0 tcpkeepalive 0 proximitywake 0 womp 0
+   sudo pmset -c sleep 0 displaysleep 5
+   sudo pmset -b sleep 5 displaysleep 5
    ```
 
 7. 确认睡眠唤醒与显示正常后，再考虑把 EFI 写入内置硬盘。作者把它放在内置硬盘上一个独立的 FAT32 分区里，没有改动 Windows 的 ESP。
@@ -190,7 +192,7 @@ THIRD_PARTY.md            第三方组件、版本和许可证
 | `-s0ixgpureset` | S0ixStandby：S0ix 唤醒瞬间执行 Tiger Lake GT 硬件复位（`GEN11_GDRST`） |
 | `-s0ixrefclk -s0ixd3` | S0ixStandby：睡眠期间释放 PCIe 参考时钟并将无驱动 PCI 设备（ISH、TBT DMA、LPSS、DPTF 等）切入 `D3hot`，解除 `SLP_S0` 阻塞进入 `PC8` 深睡 |
 | `-s0ixacnortc` | S0ixStandby：插电无用户显式定时任务时抑制系统自动维护型 RTC 唤醒 |
-| `-s0ixacnoecwake` | 本项目 S0ixStandby 补丁：插电快充期间临时屏蔽 `PWRB` 共享 `GPE 0x6E` 防充电脉冲唤醒，充满稳态或电池模式下自动恢复实体电源键与拔插充电器唤醒 |
+| `-s0ixacnoecwake` | 本项目 S0ixStandby 补丁：插电时屏蔽 `PWRB` 共享 `GPE 0x6E` S0 唤醒防 EC 周期心跳误亮屏，拔电切回电池模式时自动恢复实体电源键唤醒 |
 | `-v keepsyms=1 debug=0x100` | 调试符号与详细引导输出，稳定后可按需精简 |
 
 ### ACPI
