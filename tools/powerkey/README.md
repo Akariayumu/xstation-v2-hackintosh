@@ -4,7 +4,8 @@
 
 - `PowerKeyDialog.swift`：轮询 PWRB/AppleACPIButton 的 HID 事件计数，有按键就弹出四按钮面板。
   关机/重启发给 loginwindow（`shut`/`rest`），和系统面板一样会先让应用正常退出；
-  "关闭屏幕"执行 `pmset displaysleepnow`（代替系统睡眠，本机睡眠未验证）。
+  "关闭屏幕"执行 `pmset displaysleepnow`。
+  同时常驻持有 macOS `PreventSystemSleep` 断言（`powerd` 仅在插电 AC 下生效，电池模式下自动忽略）：插电时无论空闲还是手动点击「苹果菜单 → 睡眠」均进入仅关屏省电态（保证实体电源键与触摸屏随时秒亮，且不被 EC 心跳误亮屏）；一旦拔掉充电器切入电池模式，自动放行进入 S0ix Deep Idle（并由 `S0ixStandby` 恢复电源键 S0 唤醒）。
   屏幕关着时短按电源键只点亮屏幕（`caffeinate -u`），不弹面板。
   按住 Control 时不处理，交给系统弹它自己的面板。不需要任何隐私权限。
 - `install.sh`：编译并安装为当前用户的 LaunchAgent `org.xstation.powerkeydialog`，登录后自动运行。

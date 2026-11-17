@@ -5,10 +5,13 @@
 // 面板：系统没有公开接口能调出 Control+电源的那个面板（AppleScript 只有带 60 秒倒计时的关机确认框，
 // 模拟的 Control+电源键也不被系统接受），所以自己画一个同样四个按钮的面板，
 // 关机/重启发给 loginwindow（kAEShutDown/kAERestart），与系统面板一致：先让各应用正常退出。
-// 本机系统睡眠未验证（SleepDisabled=1，见 docs/sleep-wake-20261027），所以用"关闭屏幕"（pmset displaysleepnow）代替"睡眠"。
+// 本机插电与电池采用分离策略：启动时持有 PreventSystemSleep 断言（macOS 仅在插电 AC 下生效、
+// 电池下自动忽略），使插电时即使手动点"苹果菜单 → 睡眠"也只关屏不进屏蔽 GPE 0x6e 的系统深睡，
+// 保证电源键与触摸屏随时秒亮且绝不误唤醒；拔掉电源切电池后自动放行进入真 S0ix Deep Idle。
 // 不需要辅助功能/输入监控权限。
 import AppKit
 import IOKit
+import IOKit.pwr_mgt
 
 let pollInterval: TimeInterval = 0.25
 let debounce: TimeInterval = 3.0
@@ -85,11 +88,20 @@ app.setActivationPolicy(.accessory)
 // 关屏后不被 App Nap 节流（不阻止系统/显示器空闲休眠）
 let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: "power key watcher")
 
+// 仅在 AC 插电下阻止进入系统深睡（允许关屏），电池模式下 powerd 自动忽略该断言并正常进入 S0ix Deep Idle
+var acSleepAssertion: IOPMAssertionID = 0
+let acAssertRet = IOPMAssertionCreateWithName(
+    "PreventSystemSleep" as CFString,
+    IOPMAssertionLevel(kIOPMAssertionLevelOn),
+    "X-STATION V2 AC Display-Sleep Policy (battery S0ix unaffected)" as CFString,
+    &acSleepAssertion
+)
+
 var last = pwrbEventCount()
 var lastPress = Date.distantPast
 var lastAsleep = Date.distantPast   // 最近一次看到屏幕处于关闭状态的时间
 var displayAsleep = false
-log("started, count=\(last.map(String.init) ?? "nil")")
+log("started, count=\(last.map(String.init) ?? "nil"), acPreventSystemSleep=\(acAssertRet == kIOReturnSuccess)")
 
 Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { _ in
     let asleep = CGDisplayIsAsleep(CGMainDisplayID()) != 0

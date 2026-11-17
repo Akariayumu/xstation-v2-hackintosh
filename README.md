@@ -78,7 +78,7 @@ i7-1165G7 / Iris Xe 二合一平板电脑上的 macOS Sequoia OpenCore EFI、ACP
 
 ## 已知问题
 
-- **插电与电池采用分离睡眠策略（推荐 `pmset -c sleep 0`）。** 本机 `H_EC` 电池/Type-C PD 心跳与电源键 `PWRB` 共用 `GPE 0x6E`，即使充满至 100% 插电状态下 EC 仍会每分钟周期性触发一次 `GPE 0x6E`：因此 `-s0ixacnoecwake` 在插电时全程屏蔽 `GPE 0x6E` S0 唤醒防误亮屏（此时若手动进入系统深睡，需用蓝牙键鼠/触控板或插拔 USB 唤醒）。日常推荐插电设为仅关屏（`pmset -c sleep 0 displaysleep 5`，关屏功耗仅 `~3.8 W`，支持电源键与触摸屏 0.1 秒亮屏），电池模式设为自动进入 S0ix Deep Idle（`pmset -b sleep 5 displaysleep 5`，自动恢复实体电源键唤醒）。
+- **插电与电池采用分离睡眠策略（`pmset` + `tools/powerkey`）。** 本机 `H_EC` 电池/Type-C PD 心跳与电源键 `PWRB` 共用 `GPE 0x6E`，即使充满至 100% 插电状态下 EC 仍会每分钟周期性触发一次 `GPE 0x6E`：因此 `-s0ixacnoecwake` 在插电时全程屏蔽 `GPE 0x6E` S0 唤醒防误亮屏，同时配套的 `tools/powerkey`（`PowerKeyDialog`）持有仅对插电生效的 `PreventSystemSleep` 断言——插电时无论闲置还是手动点击「苹果菜单 → 睡眠」均进入仅关屏省电态（`~3.8 W`，支持电源键与触摸屏随时秒亮，绝不误唤醒）；一旦拔掉充电器切回电池模式，`powerd` 自动忽略该断言并放行进入真 S0ix Deep Idle（`PC8 99%` + `DC9`，自动恢复实体电源键唤醒）。
 - **长时睡眠唤醒后 Wi-Fi 约需 25–35 秒自动重连。** 短时睡眠唤醒后 Wi-Fi 通常数秒内恢复；经历数小时平台 S0ix 深睡唤醒后，`AirportItlwm` 重新初始化 AX201 固件并完成 WPA2 关联约需 25–35 秒。
 - **高负载视频壁纸与远程桌面截屏叠加偶发 GPU 重启。** 动态壁纸（WebKit 播放视频）与远程桌面截屏同时运行时，早期版本出现过 `GPURestart` → `WindowServer` 看门狗超时。日常避免两者长时间叠加运行。
 - **触摸驱动极低概率空指针 panic**：VoodooI2C 在 `forwardReport` 中读 `IOFBTransform` 时没有判空，很少触发。
