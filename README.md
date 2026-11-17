@@ -69,7 +69,7 @@ i7-1165G7 / Iris Xe 二合一平板电脑上的 macOS Sequoia OpenCore EFI、ACP
 | 项目 | 定位 | 核心特性与本机联动优化 |
 |---|---|---|
 | **[Xmonitor](https://github.com/Akariayumu/Xmonitor)** | 原生硬件监控套件 | 顶部同色菜单栏 + 壁纸层常驻小组件 + 8 页签深度控制台。进程内零子进程直读 `APERF/MPERF` 真实频率、RAPL 封装/核显功率、`SMCProcessor` 温度、`S0ixStandby` 零 Forcewake 核显 MHz、SMC 实时充放电净流、NVMe SMART 与 S0ix `CC7 / PC8 / DC9` 驻留诊断；熄屏与睡眠自动降为 `0 Hz` 零唤醒，常驻 CPU `< 0.3%`。 |
-| **[ScreenBoard](https://github.com/Akariayumu/ScreenBoard-for-Mac)** | 仿 Win11 触摸屏幕键盘 | 专为拆下磁吸键盘后的纯平板触控模式打造。浮动面板不抢当前窗口输入焦点，支持底部铺满停靠、自由浮动与左右分体拇指布局；虚拟键码直通系统原生拼音输入法，支持长按备选符号、按词删改移动与点按文本框自动弹出。 |
+| **[ScreenBoard](https://github.com/Akariayumu/ScreenBoard-for-Mac)** | 仿 Win11 触摸屏幕键盘 | 专为拆下磁吸键盘后的纯平板触控模式打造。浮动面板不抢当前窗口输入焦点，支持底部铺满停靠、自由浮动与左右分体拇指布局；虚拟键码直通系统原生拼音输入法，支持长按备选符号、按词删改移动与点按文本框自动弹出；锁屏/休眠唤醒自动接力系统辅助键盘供触屏输密码，解锁回桌面自动关闭。 |
 | **[Wallpaper4Mac](https://github.com/Akariayumu/Wallpaper4Mac)** | 低功耗动态视频壁纸 | 原生菜单栏管理端 + 静音硬解播放内核 + `hevc_videotoolbox` 硬件转码脚本。针对本机功耗与窗口看门狗做了激进省电联动：关屏、S0ix 睡眠、切电池供电、全屏应用或前台焦点离开桌面满 5 秒自动暂停视频解码，触摸或键鼠操作瞬间无感恢复。 |
 
 | [Xmonitor](https://github.com/Akariayumu/Xmonitor)（菜单栏 · 桌面组件 · S0ix 控制台） | [ScreenBoard](https://github.com/Akariayumu/ScreenBoard-for-Mac)（平板触控分体屏幕键盘） | [Wallpaper4Mac](https://github.com/Akariayumu/Wallpaper4Mac)（智能暂停低功耗动态壁纸） |
