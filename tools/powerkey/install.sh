@@ -7,7 +7,9 @@ LABEL=org.xstation.powerkeydialog
 DIR="$HOME/Library/Application Support/XStation"
 BIN="$DIR/PowerKeyDialog"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-SRC="$(cd "$(dirname "$0")" && pwd)/PowerKeyDialog.swift"
+SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
+POLICY_SRC="$SRC_DIR/PowerKeyPolicy.swift"
+DIALOG_SRC="$SRC_DIR/PowerKeyDialog.swift"
 
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 # bootout 是异步的，等旧实例完全卸载后再 bootstrap，否则会报 125
@@ -22,7 +24,7 @@ if [ "${1:-}" = remove ]; then
 fi
 
 mkdir -p "$DIR" "$HOME/Library/LaunchAgents"
-swiftc -O "$SRC" -o "$BIN"
+swiftc -O "$POLICY_SRC" "$DIALOG_SRC" -o "$BIN"
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

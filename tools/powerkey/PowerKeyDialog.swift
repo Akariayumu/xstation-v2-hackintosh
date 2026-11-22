@@ -2,19 +2,16 @@
 // 依赖 v0.1.50 的 EC 修复（PWRB -> AppleACPIButton 已能收到按键）。
 // 检测：轮询 PWRB/AppleACPIButton 下 IOHIDEventServiceUserClient 的 DebugState.EnqueueEventCount，
 // 计数增加 = 有按键。按住 Control 时跳过（系统自己会弹框）。
-// 面板：系统没有公开接口能调出 Control+电源的那个面板（AppleScript 只有带 60 秒倒计时的关机确认框，
-// 模拟的 Control+电源键也不被系统接受），所以自己画一个同样四个按钮的面板，
-// 关机/重启发给 loginwindow（kAEShutDown/kAERestart），与系统面板一致：先让各应用正常退出。
-// 本机插电与电池采用分离策略：启动时持有 PreventSystemSleep 断言（macOS 仅在插电 AC 下生效、
-// 电池下自动忽略），使插电时即使手动点"苹果菜单 → 睡眠"也只关屏不进屏蔽 GPE 0x6e 的系统深睡，
-// 保证电源键与触摸屏随时秒亮且绝不误唤醒；拔掉电源切电池后自动放行进入真 S0ix Deep Idle。
-// 不需要辅助功能/输入监控权限。
+// 指纹联动：当会话处于锁屏态（屏幕亮着）或收到 org.xstation.xfinger.willUnlock 后的 2.5 秒内，
+// 仅推进按键计数基线而不弹出关机面板，防止按一体式指纹电源键解锁时误弹关机框。
 import AppKit
+import CoreGraphics
 import IOKit
 import IOKit.pwr_mgt
 
 let pollInterval: TimeInterval = 0.25
-let debounce: TimeInterval = 3.0
+let debounceInterval: TimeInterval = 3.0
+let willUnlockNotification = Notification.Name("org.xstation.xfinger.willUnlock")
 
 func log(_ s: String) {
     FileHandle.standardError.write("\(Date()) \(s)\n".data(using: .utf8)!)
@@ -25,6 +22,19 @@ func run(_ path: String, _ args: [String]) {
     p.executableURL = URL(fileURLWithPath: path)
     p.arguments = args
     do { try p.run() } catch { log("\(path) failed: \(error)") }
+}
+
+func isSessionLocked() -> Bool {
+    guard let dict = CGSessionCopyCurrentDictionary() as? [String: Any] else {
+        return false
+    }
+    if let locked = dict["CGSSessionScreenIsLocked"] as? Bool {
+        return locked
+    }
+    if let lockedNum = dict["CGSSessionScreenIsLocked"] as? NSNumber {
+        return lockedNum.boolValue
+    }
+    return false
 }
 
 // 返回 PWRB 下所有 user client 的 EnqueueEventCount 之和；找不到返回 nil
@@ -75,7 +85,6 @@ func showPowerPanel() {
     case .alertFirstButtonReturn: log("shut down"); tellLoginwindow("shut")
     case .alertThirdButtonReturn:
         log("panel: turn display off")
-        // 稍等让点击/按键松开，避免刚关就被这次输入唤醒
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { run("/usr/bin/pmset", ["displaysleepnow"]) }
     case NSApplication.ModalResponse(rawValue: NSApplication.ModalResponse.alertThirdButtonReturn.rawValue + 1):
         log("restart"); tellLoginwindow("rest")
@@ -83,48 +92,89 @@ func showPowerPanel() {
     }
 }
 
-let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
-// 关屏后不被 App Nap 节流（不阻止系统/显示器空闲休眠）
-let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: "power key watcher")
+final class UnlockCooldownObserver: NSObject {
+    var suppressUntil: Date = .distantPast
 
-// 仅在 AC 插电下阻止进入系统深睡（允许关屏），电池模式下 powerd 自动忽略该断言并正常进入 S0ix Deep Idle
-var acSleepAssertion: IOPMAssertionID = 0
-let acAssertRet = IOPMAssertionCreateWithName(
-    "PreventSystemSleep" as CFString,
-    IOPMAssertionLevel(kIOPMAssertionLevelOn),
-    "X-STATION V2 AC Display-Sleep Policy (battery S0ix unaffected)" as CFString,
-    &acSleepAssertion
-)
-
-var last = pwrbEventCount()
-var lastPress = Date.distantPast
-var lastAsleep = Date.distantPast   // 最近一次看到屏幕处于关闭状态的时间
-var displayAsleep = false
-log("started, count=\(last.map(String.init) ?? "nil"), acPreventSystemSleep=\(acAssertRet == kIOReturnSuccess)")
-
-Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { _ in
-    let asleep = CGDisplayIsAsleep(CGMainDisplayID()) != 0
-    if asleep { lastAsleep = Date() }
-    if asleep != displayAsleep { displayAsleep = asleep; log(asleep ? "display off" : "display on") }
-    guard let now = pwrbEventCount() else { last = nil; return }
-    defer { last = pwrbEventCount() ?? now }   // 面板关闭后重取基线，忽略面板打开期间的按键
-    guard let prev = last, now > prev else { return }   // 首次出现或计数重置（WindowServer 重启）时只更新基线
-
-    if CGEventSource.flagsState(.combinedSessionState).contains(.maskControl) {
-        log("press with Control, leave it to the system")
-        lastPress = Date()
-        return
+    @objc func handleWillUnlock(_ note: Notification) {
+        suppressUntil = Date().addingTimeInterval(2.5)
+        log("received org.xstation.xfinger.willUnlock, suppressing panel for 2.5s")
     }
-    if Date().timeIntervalSince(lastPress) < debounce { return }
-    lastPress = Date()
-    // 屏幕关着（或这次按键刚把它点亮）：只唤醒屏幕，不弹面板
-    if Date().timeIntervalSince(lastAsleep) < 1.5 {
-        log("power key press (count \(prev) -> \(now)) while display off, waking display")
-        run("/usr/bin/caffeinate", ["-u", "-t", "2"])
-        return
-    }
-    log("power key press (count \(prev) -> \(now)), showing panel")
-    showPowerPanel()
 }
-app.run()
+
+@main
+enum PowerKeyDialogApp {
+    static var activityToken: NSObjectProtocol?
+    static let unlockObserver = UnlockCooldownObserver()
+
+    static func main() {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        activityToken = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep,
+            reason: "power key watcher"
+        )
+
+        DistributedNotificationCenter.default().addObserver(
+            unlockObserver,
+            selector: #selector(UnlockCooldownObserver.handleWillUnlock(_:)),
+            name: willUnlockNotification,
+            object: nil,
+            suspensionBehavior: .deliverImmediately
+        )
+
+        var acSleepAssertion: IOPMAssertionID = 0
+        let acAssertRet = IOPMAssertionCreateWithName(
+            "PreventSystemSleep" as CFString,
+            IOPMAssertionLevel(kIOPMAssertionLevelOn),
+            "X-STATION V2 AC Display-Sleep Policy (battery S0ix unaffected)" as CFString,
+            &acSleepAssertion
+        )
+
+        var last = pwrbEventCount()
+        var lastPress = Date.distantPast
+        var lastAsleep = Date.distantPast
+        var displayAsleep = false
+        log("started, count=\(last.map(String.init) ?? "nil"), acPreventSystemSleep=\(acAssertRet == kIOReturnSuccess)")
+
+        Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { _ in
+            let nowDate = Date()
+            let asleep = CGDisplayIsAsleep(CGMainDisplayID()) != 0
+            if asleep { lastAsleep = nowDate }
+            if asleep != displayAsleep { displayAsleep = asleep; log(asleep ? "display off" : "display on") }
+            guard let curCount = pwrbEventCount() else { last = nil; return }
+            defer { last = pwrbEventCount() ?? curCount }
+            guard let prev = last, curCount > prev else { return }
+
+            let controlHeld = CGEventSource.flagsState(.combinedSessionState).contains(.maskControl)
+            let locked = isSessionLocked()
+            let decision = decidePowerKeyAction(
+                now: nowDate,
+                lastPress: lastPress,
+                lastAsleep: lastAsleep,
+                unlockSuppressUntil: unlockObserver.suppressUntil,
+                controlHeld: controlHeld,
+                sessionLocked: locked,
+                debounce: debounceInterval
+            )
+            if decision.updateLastPress {
+                lastPress = nowDate
+            }
+
+            switch decision.action {
+            case .ignore:
+                if controlHeld {
+                    log("press with Control, leave it to the system")
+                } else if locked || nowDate < unlockObserver.suppressUntil {
+                    log("power key press (count \(prev) -> \(curCount)) suppressed (locked=\(locked), unlockCooldown=\(nowDate < unlockObserver.suppressUntil))")
+                }
+            case .wakeDisplayOnly:
+                log("power key press (count \(prev) -> \(curCount)) while display off, waking display")
+                run("/usr/bin/caffeinate", ["-u", "-t", "2"])
+            case .showPanel:
+                log("power key press (count \(prev) -> \(curCount)), showing panel")
+                showPowerPanel()
+            }
+        }
+        app.run()
+    }
+}
