@@ -42,12 +42,15 @@ public:
     void releaseClientSession(FocalTechSPIUserClient *client);
 
     IOBufferMemoryDescriptor *sharedTransferBuffer() const { return sharedBuf_; }
-    void *sharedTransferBytes() const { return sharedBufBytes_; }
 
     IOReturn getHwInfo(FocalTechSPIHwInfo *outInfo);
     IOReturn setResetPin(uint32_t level);
     IOReturn setSpiConfig(uint32_t speedHz, uint8_t spiMode);
-    IOReturn spiTransferInSharedBuffer(uint32_t length);
+    IOReturn spiTransfer(uint32_t length,
+                         IOMemoryDescriptor *inDesc,
+                         const void *inInline,
+                         IOMemoryDescriptor *outDesc,
+                         void *outInline);
     IOReturn waitIrq(uint32_t lastSeq,
                      uint32_t expectedGen,
                      uint32_t timeoutMs,
@@ -68,7 +71,9 @@ private:
     };
 
     bool locateAndParseAcpiFpnt(IOPCIDevice *pci);
+    bool verifyFpntHid();
     bool mapGpioCommunities();
+    void configureIrqPadRoutingLocked();
     void registerGpioInterrupt();
     void unregisterGpioInterrupt();
 
@@ -79,23 +84,28 @@ private:
     void hwInitD0Locked();
     void hwEnterD3Locked();
     void restorePciD0Locked();
+    IOReturn spiTransferLocked(uint32_t length);
 
     uint32_t readIrqPinLevel() const;
+    void drainPendingIrqEdgesGated();
 
     static void interruptOccurred(OSObject *owner, void *refCon, IOService *nub, int source);
     static IOReturn gatedReadLeaseAction(OSObject *owner, void *arg0, void *arg1, void *arg2, void *arg3);
     static IOReturn gatedSleepRolloverAction(OSObject *owner, void *arg0, void *arg1, void *arg2, void *arg3);
     static IOReturn gatedWakeRefreshAction(OSObject *owner, void *arg0, void *arg1, void *arg2, void *arg3);
-    static IOReturn gatedIrqEdgeAction(OSObject *owner, void *arg0, void *arg1, void *arg2, void *arg3);
+    static IOReturn gatedSetClientStateAction(OSObject *owner, void *arg0, void *arg1, void *arg2, void *arg3);
+    static IOReturn gatedStopDrainAction(OSObject *owner, void *arg0, void *arg1, void *arg2, void *arg3);
     static IOReturn gatedWaitIrqAction(OSObject *owner, void *arg0, void *arg1, void *arg2, void *arg3);
     IOReturn waitIrqGated(WaitIrqArgs *args);
 
     IOPCIDevice *pciDevice_{nullptr};
+    bool pciOpened_{false};
     IOMemoryMap *bar0Map_{nullptr};
     volatile uint8_t *bar0_{nullptr};
     UInt8 pmCapOffset_{0};
     uint32_t savedBar0Low_{0};
     uint32_t savedBar0High_{0};
+    uint32_t savedClockParams_{0};
     bool bar0Is64Bit_{false};
 
     IOACPIPlatformDevice *fpntDevice_{nullptr};
@@ -105,16 +115,22 @@ private:
     uint32_t resetPadOffset_{0};
     uint32_t irqBarIdx_{0};
     uint32_t irqPadOffset_{0};
+    uint32_t savedIrqPadDw0_{0};
+    bool irqPadModified_{false};
 
     IOService *gpioIrqProvider_{nullptr};
     bool irqRegistered_{false};
-    volatile uint32_t hwIrqDeliveredCount_{0};
+    volatile SInt32 hwIrqDeliveredCount_{0};
+    volatile SInt32 pendingHwIrqEdges_{0};
 
     IOWorkLoop *workLoop_{nullptr};
     IOCommandGate *commandGate_{nullptr};
     IOLock *hwLock_{nullptr};
     IOLock *clientLock_{nullptr};
     FocalTechSPIUserClient *activeClient_{nullptr};
+    bool hasActiveClientGated_{false};
+    bool shuttingDown_{false};
+    uint32_t inFlightWaiters_{0};
 
     IOBufferMemoryDescriptor *sharedBuf_{nullptr};
     uint8_t *sharedBufBytes_{nullptr};
@@ -123,6 +139,7 @@ private:
     fspi::SessionLease lease_{};
     uint32_t lastSampledIrqLevel_{0};
     uint8_t irqWaitToken_{0};
+    uint8_t drainToken_{0};
 
     uint32_t currentSpeedHz_{4000000u};
     uint8_t currentMode_{0u};

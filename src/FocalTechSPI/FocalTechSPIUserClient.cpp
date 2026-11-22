@@ -135,56 +135,40 @@ IOReturn FocalTechSPIUserClient::sSpiTransfer(OSObject *target, void * /*referen
         return kIOReturnBadArgument;
     }
     const uint32_t len = static_cast<uint32_t>(reqLen64);
-    void *sharedBytes = self->provider_->sharedTransferBytes();
-    if (!sharedBytes) {
-        return kIOReturnNotReady;
-    }
 
-    // Copy optional inline or out-of-line input struct into shared kernel buffer
-    if (args->structureInputDescriptor) {
-        if (args->structureInputDescriptor->getLength() < len) {
+    IOMemoryDescriptor *inDesc = args->structureInputDescriptor;
+    const void *inInline = nullptr;
+    if (inDesc) {
+        if (inDesc->getLength() < len) {
             return kIOReturnBadArgument;
-        }
-        if (args->structureInputDescriptor->prepare(kIODirectionOut) != kIOReturnSuccess) {
-            return kIOReturnVMError;
-        }
-        const IOByteCount copied = args->structureInputDescriptor->readBytes(0, sharedBytes, len);
-        args->structureInputDescriptor->complete(kIODirectionOut);
-        if (copied != len) {
-            return kIOReturnVMError;
         }
     } else if (args->structureInput && args->structureInputSize > 0u) {
         if (args->structureInputSize < len) {
             return kIOReturnBadArgument;
         }
-        memcpy(sharedBytes, args->structureInput, len);
+        inInline = args->structureInput;
     }
 
-    const IOReturn rc = self->provider_->spiTransferInSharedBuffer(len);
+    IOMemoryDescriptor *outDesc = args->structureOutputDescriptor;
+    void *outInline = nullptr;
+    if (outDesc) {
+        if (outDesc->getLength() < len) {
+            return kIOReturnBadArgument;
+        }
+    } else if (args->structureOutput && args->structureOutputSize >= len) {
+        outInline = args->structureOutput;
+    }
+
+    const IOReturn rc = self->provider_->spiTransfer(len, inDesc, inInline, outDesc, outInline);
     args->scalarOutput[0] = static_cast<uint64_t>(static_cast<uint32_t>(rc));
     if (rc != kIOReturnSuccess) {
         return rc;
     }
-
-    // Copy RX bytes back if caller passed inline or out-of-line output struct
-    if (args->structureOutputDescriptor) {
-        if (args->structureOutputDescriptor->getLength() < len) {
-            return kIOReturnBadArgument;
-        }
-        if (args->structureOutputDescriptor->prepare(kIODirectionIn) != kIOReturnSuccess) {
-            return kIOReturnVMError;
-        }
-        const IOByteCount written = args->structureOutputDescriptor->writeBytes(0, sharedBytes, len);
-        args->structureOutputDescriptor->complete(kIODirectionIn);
-        if (written != len) {
-            return kIOReturnVMError;
-        }
+    if (outDesc) {
         args->structureOutputDescriptorSize = len;
-    } else if (args->structureOutput && args->structureOutputSize >= len) {
-        memcpy(args->structureOutput, sharedBytes, len);
+    } else if (outInline) {
         args->structureOutputSize = len;
     }
-
     return kIOReturnSuccess;
 }
 

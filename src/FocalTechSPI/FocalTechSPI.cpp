@@ -42,6 +42,31 @@ bool FocalTechSPI::init(OSDictionary *dictionary) {
     return (hwLock_ != nullptr && clientLock_ != nullptr);
 }
 
+bool FocalTechSPI::verifyFpntHid() {
+    if (!fpntDevice_) {
+        return false;
+    }
+    OSObject *hidObj = nullptr;
+    if (fpntDevice_->evaluateObject("_HID", &hidObj) == kIOReturnSuccess && hidObj) {
+        bool match = false;
+        if (OSString *hidStr = OSDynamicCast(OSString, hidObj)) {
+            match = fspi::isSupportedFpntHid(hidStr->getCStringNoCopy());
+        }
+        hidObj->release();
+        return match;
+    }
+    if (OSString *propStr = OSDynamicCast(OSString, fpntDevice_->getProperty("name"))) {
+        return fspi::isSupportedFpntHid(propStr->getCStringNoCopy());
+    }
+    if (OSData *propData = OSDynamicCast(OSData, fpntDevice_->getProperty("name"))) {
+        const char *bytes = static_cast<const char *>(propData->getBytesNoCopy());
+        if (bytes && propData->getLength() == 8u && bytes[7] == '\0') {
+            return fspi::isSupportedFpntHid(bytes);
+        }
+    }
+    return false;
+}
+
 bool FocalTechSPI::locateAndParseAcpiFpnt(IOPCIDevice *pci) {
     const IORegistryPlane *acpiPlane = IORegistryEntry::getPlane("IOACPIPlane");
     if (!acpiPlane) {
@@ -102,6 +127,11 @@ bool FocalTechSPI::locateAndParseAcpiFpnt(IOPCIDevice *pci) {
         return false;
     }
 
+    if (!verifyFpntHid()) {
+        FSPI_LOG("FPNT _HID is not FTE3600; refusing to attach");
+        return false;
+    }
+
     OSObject *crsObj = nullptr;
     if (fpntDevice_->evaluateObject("_CRS", &crsObj) != kIOReturnSuccess || !crsObj) {
         FSPI_LOG("Failed to evaluate FPNT._CRS");
@@ -111,7 +141,7 @@ bool FocalTechSPI::locateAndParseAcpiFpnt(IOPCIDevice *pci) {
     bool ok = false;
     if (crsData && crsData->getBytesNoCopy() && crsData->getLength() > 0) {
         ok = fspi::parseFpntCrs(
-             static_cast<const uint8_t *>(crsData->getBytesNoCopy()),
+            static_cast<const uint8_t *>(crsData->getBytesNoCopy()),
             crsData->getLength(),
             &res_);
     }
@@ -166,6 +196,29 @@ bool FocalTechSPI::mapGpioCommunities() {
     return true;
 }
 
+void FocalTechSPI::configureIrqPadRoutingLocked() {
+    IOMemoryMap *map = (irqBarIdx_ < 4u) ? gpioBarMaps_[irqBarIdx_] : nullptr;
+    if (!map || map->getVirtualAddress() == 0) {
+        return;
+    }
+    volatile uint32_t *dw0Ptr = reinterpret_cast<volatile uint32_t *>(
+        reinterpret_cast<volatile uint8_t *>(map->getVirtualAddress()) + irqPadOffset_);
+    const uint32_t orig = *dw0Ptr;
+    if ((orig & fspi::kPadCfgDw0RoutSci) != 0u) {
+        FSPI_LOG("IRQ pad GNUM %u routed to ACPI SCI (DW0=0x%08x); preserving pad routing", res_.irqGnum, orig);
+        return;
+    }
+    if (!irqPadModified_) {
+        savedIrqPadDw0_ = orig;
+        irqPadModified_ = true;
+    }
+    const uint32_t next = fspi::configureIrqPadDw0(orig, res_);
+    if (next != orig) {
+        *dw0Ptr = next;
+        (void)*dw0Ptr;
+    }
+}
+
 void FocalTechSPI::registerGpioInterrupt() {
     if (!gpi0Device_) {
         return;
@@ -196,6 +249,9 @@ void FocalTechSPI::registerGpioInterrupt() {
     const int pin = static_cast<int>(res_.irqGnum);
     IOReturn rc = gpioIrqProvider_->registerInterrupt(pin, this, &FocalTechSPI::interruptOccurred, nullptr);
     if (rc == kIOReturnSuccess) {
+        IOLockLock(hwLock_);
+        configureIrqPadRoutingLocked();
+        IOLockUnlock(hwLock_);
         irqRegistered_ = true;
         (void)gpioIrqProvider_->enableInterrupt(pin);
         FSPI_LOG("Registered GPIO IRQ pin %d via %s", pin, gpioIrqProvider_->getMetaClass()->getClassName());
@@ -211,6 +267,18 @@ void FocalTechSPI::unregisterGpioInterrupt() {
         (void)gpioIrqProvider_->disableInterrupt(pin);
         (void)gpioIrqProvider_->unregisterInterrupt(pin);
         irqRegistered_ = false;
+    }
+    if (irqPadModified_) {
+        IOMemoryMap *map = (irqBarIdx_ < 4u) ? gpioBarMaps_[irqBarIdx_] : nullptr;
+        if (map && map->getVirtualAddress() != 0 && hwLock_) {
+            IOLockLock(hwLock_);
+            volatile uint32_t *dw0Ptr = reinterpret_cast<volatile uint32_t *>(
+                reinterpret_cast<volatile uint8_t *>(map->getVirtualAddress()) + irqPadOffset_);
+            *dw0Ptr = savedIrqPadDw0_;
+            (void)*dw0Ptr;
+            IOLockUnlock(hwLock_);
+        }
+        irqPadModified_ = false;
     }
     OSSafeReleaseNULL(gpioIrqProvider_);
 }
@@ -273,6 +341,12 @@ void FocalTechSPI::hwInitD0Locked() {
     (void)mmioRead32(fspi::kRegLpssPrivResets);
     IODelay(10);
 
+    if ((savedClockParams_ & 0x01u) != 0u &&
+        (mmioRead32(fspi::kRegLpssPrivClockParams) & 0x01u) == 0u) {
+        mmioWrite32(fspi::kRegLpssPrivClockParams, savedClockParams_);
+        (void)mmioRead32(fspi::kRegLpssPrivClockParams);
+    }
+
     mmioWrite32(fspi::kRegSscr0, 0u);
     (void)mmioRead32(fspi::kRegSscr0);
     drainRxFifoLocked();
@@ -285,6 +359,10 @@ void FocalTechSPI::hwInitD0Locked() {
 
 void FocalTechSPI::hwEnterD3Locked() {
     if (bar0_) {
+        const uint32_t clk = mmioRead32(fspi::kRegLpssPrivClockParams);
+        if ((clk & 0x01u) != 0u) {
+            savedClockParams_ = clk;
+        }
         setCsActiveLocked(false);
         mmioWrite32(fspi::kRegSscr0, 0u);
         mmioWrite32(fspi::kRegLpssPrivResets, 0u);
@@ -316,15 +394,24 @@ bool FocalTechSPI::start(IOService *provider) {
     int offArg = 0;
     if (PE_parse_boot_argn("-fspioff", &offArg, sizeof(offArg))) {
         FSPI_LOG("Disabled by -fspioff boot-arg");
+        IOService::stop(provider);
         return false;
     }
 
     pciDevice_ = OSDynamicCast(IOPCIDevice, provider);
     if (!pciDevice_) {
         FSPI_LOG("Provider is not IOPCIDevice");
+        IOService::stop(provider);
         return false;
     }
     pciDevice_->retain();
+
+    if (!pciDevice_->open(this)) {
+        FSPI_LOG("Failed to open IOPCIDevice provider");
+        stop(provider);
+        return false;
+    }
+    pciOpened_ = true;
 
     if (!locateAndParseAcpiFpnt(pciDevice_)) {
         stop(provider);
@@ -382,6 +469,9 @@ bool FocalTechSPI::start(IOService *provider) {
     }
 
     IOLockLock(hwLock_);
+    mmioWrite32(fspi::kRegLpssPrivResets, fspi::kLpssResetRelease);
+    (void)mmioRead32(fspi::kRegLpssPrivResets);
+    savedClockParams_ = mmioRead32(fspi::kRegLpssPrivClockParams);
     hwInitD0Locked();
     powerState_ = 1u;
     IOLockUnlock(hwLock_);
@@ -415,7 +505,8 @@ void FocalTechSPI::stop(IOService *provider) {
     unregisterGpioInterrupt();
 
     if (commandGate_) {
-        commandGate_->commandWakeup(&irqWaitToken_, false);
+        (void)commandGate_->runAction(&FocalTechSPI::gatedStopDrainAction);
+        commandGate_->disable();
         if (workLoop_) {
             workLoop_->removeEventSource(commandGate_);
         }
@@ -439,7 +530,13 @@ void FocalTechSPI::stop(IOService *provider) {
     }
     OSSafeReleaseNULL(fpntDevice_);
     OSSafeReleaseNULL(gpi0Device_);
-    OSSafeReleaseNULL(pciDevice_);
+    if (pciDevice_) {
+        if (pciOpened_) {
+            pciDevice_->close(this);
+            pciOpened_ = false;
+        }
+        OSSafeReleaseNULL(pciDevice_);
+    }
 
     IOService::stop(provider);
 }
@@ -476,6 +573,9 @@ IOReturn FocalTechSPI::setPowerState(unsigned long powerStateOrdinal, IOService 
         if (powerState_ == 0u) {
             restorePciD0Locked();
             hwInitD0Locked();
+            if (irqRegistered_) {
+                configureIrqPadRoutingLocked();
+            }
             powerState_ = 1u;
         }
         IOLockUnlock(hwLock_);
@@ -530,7 +630,7 @@ IOReturn FocalTechSPI::newUserClient(task_t owningTask,
 }
 
 bool FocalTechSPI::acquireClientSession(FocalTechSPIUserClient *client) {
-    if (!client || !clientLock_) {
+    if (!client || !clientLock_ || isInactive()) {
         return false;
     }
     bool acquired = false;
@@ -540,6 +640,11 @@ bool FocalTechSPI::acquireClientSession(FocalTechSPIUserClient *client) {
         acquired = true;
     }
     IOLockUnlock(clientLock_);
+
+    if (acquired && commandGate_) {
+        bool active = true;
+        (void)commandGate_->runAction(&FocalTechSPI::gatedSetClientStateAction, &active);
+    }
     return acquired;
 }
 
@@ -556,24 +661,38 @@ void FocalTechSPI::releaseClientSession(FocalTechSPIUserClient *client) {
     IOLockUnlock(clientLock_);
 
     if (released && commandGate_) {
-        commandGate_->commandWakeup(&irqWaitToken_, false);
+        bool active = false;
+        (void)commandGate_->runAction(&FocalTechSPI::gatedSetClientStateAction, &active);
     }
 }
 
 void FocalTechSPI::interruptOccurred(OSObject *owner, void * /*refCon*/, IOService * /*nub*/, int /*source*/) {
-    FocalTechSPI *self = OSDynamicCast(FocalTechSPI, owner);
-    if (!self || !self->commandGate_) {
+    FocalTechSPI *self = static_cast<FocalTechSPI *>(owner);
+    if (!self) {
         return;
     }
+    // Primary interrupt context: strictly lock-free atomic counters + commandWakeup only.
     OSIncrementAtomic(&self->hwIrqDeliveredCount_);
-    (void)self->commandGate_->attemptAction(&FocalTechSPI::gatedIrqEdgeAction);
-    self->commandGate_->commandWakeup(&self->irqWaitToken_, false);
+    OSIncrementAtomic(&self->pendingHwIrqEdges_);
+    if (IOCommandGate *gate = self->commandGate_) {
+        gate->commandWakeup(&self->irqWaitToken_, false);
+    }
+}
+
+void FocalTechSPI::drainPendingIrqEdgesGated() {
+    const SInt32 pending = pendingHwIrqEdges_;
+    if (pending > 0) {
+        OSAddAtomic(-pending, &pendingHwIrqEdges_);
+        lease_.recordIrqEdges(static_cast<uint32_t>(pending));
+        lastSampledIrqLevel_ = readIrqPinLevel();
+    }
 }
 
 IOReturn FocalTechSPI::gatedReadLeaseAction(OSObject *owner, void *arg0, void * /*arg1*/, void * /*arg2*/, void * /*arg3*/) {
     FocalTechSPI *self = OSDynamicCast(FocalTechSPI, owner);
     uint32_t *outGen = static_cast<uint32_t *>(arg0);
     if (self && outGen) {
+        self->drainPendingIrqEdgesGated();
         *outGen = self->lease_.generation();
     }
     return kIOReturnSuccess;
@@ -593,6 +712,7 @@ IOReturn FocalTechSPI::gatedSleepRolloverAction(OSObject *owner, void * /*arg0*/
 IOReturn FocalTechSPI::gatedWakeRefreshAction(OSObject *owner, void * /*arg0*/, void * /*arg1*/, void * /*arg2*/, void * /*arg3*/) {
     FocalTechSPI *self = OSDynamicCast(FocalTechSPI, owner);
     if (self) {
+        self->drainPendingIrqEdgesGated();
         self->lastSampledIrqLevel_ = self->readIrqPinLevel();
         if (self->commandGate_) {
             self->commandGate_->commandWakeup(&self->irqWaitToken_, false);
@@ -601,11 +721,28 @@ IOReturn FocalTechSPI::gatedWakeRefreshAction(OSObject *owner, void * /*arg0*/, 
     return kIOReturnSuccess;
 }
 
-IOReturn FocalTechSPI::gatedIrqEdgeAction(OSObject *owner, void * /*arg0*/, void * /*arg1*/, void * /*arg2*/, void * /*arg3*/) {
+IOReturn FocalTechSPI::gatedSetClientStateAction(OSObject *owner, void *arg0, void * /*arg1*/, void * /*arg2*/, void * /*arg3*/) {
     FocalTechSPI *self = OSDynamicCast(FocalTechSPI, owner);
-    if (self) {
-        self->lastSampledIrqLevel_ = self->readIrqPinLevel();
-        self->lease_.recordIrqEdge();
+    const bool *activePtr = static_cast<const bool *>(arg0);
+    if (self && activePtr) {
+        self->hasActiveClientGated_ = *activePtr;
+        if (!*activePtr && self->commandGate_) {
+            self->commandGate_->commandWakeup(&self->irqWaitToken_, false);
+        }
+    }
+    return kIOReturnSuccess;
+}
+
+IOReturn FocalTechSPI::gatedStopDrainAction(OSObject *owner, void * /*arg0*/, void * /*arg1*/, void * /*arg2*/, void * /*arg3*/) {
+    FocalTechSPI *self = OSDynamicCast(FocalTechSPI, owner);
+    if (!self || !self->commandGate_) {
+        return kIOReturnSuccess;
+    }
+    self->shuttingDown_ = true;
+    self->hasActiveClientGated_ = false;
+    self->commandGate_->commandWakeup(&self->irqWaitToken_, false);
+    while (self->inFlightWaiters_ > 0u) {
+        (void)self->commandGate_->commandSleep(&self->drainToken_, THREAD_UNINT);
     }
     return kIOReturnSuccess;
 }
@@ -633,12 +770,9 @@ IOReturn FocalTechSPI::getHwInfo(FocalTechSPIHwInfo *outInfo) {
 }
 
 IOReturn FocalTechSPI::setResetPin(uint32_t level) {
-    IOMemoryMap *map = (resetBarIdx_ < 4u) ? gpioBarMaps_[resetBarIdx_] : nullptr;
-    if (!map || map->getVirtualAddress() == 0) {
-        return kIOReturnNotReady;
-    }
     IOLockLock(hwLock_);
-    if (powerState_ == 0u) {
+    IOMemoryMap *map = (resetBarIdx_ < 4u) ? gpioBarMaps_[resetBarIdx_] : nullptr;
+    if (powerState_ == 0u || !map || map->getVirtualAddress() == 0) {
         IOLockUnlock(hwLock_);
         return kIOReturnNotReady;
     }
@@ -670,19 +804,14 @@ IOReturn FocalTechSPI::setSpiConfig(uint32_t speedHz, uint8_t spiMode) {
     return kIOReturnSuccess;
 }
 
-IOReturn FocalTechSPI::spiTransferInSharedBuffer(uint32_t length) {
-    if (length == 0u || length > kFocalTechSPIMaxTransfer || !sharedBufBytes_) {
-        return kIOReturnBadArgument;
-    }
-
-    IOLockLock(hwLock_);
-    if (powerState_ == 0u || !bar0_) {
-        IOLockUnlock(hwLock_);
+IOReturn FocalTechSPI::spiTransferLocked(uint32_t length) {
+    if (powerState_ == 0u || !bar0_ || !sharedBufBytes_) {
         return kIOReturnNotReady;
     }
 
+    const uint32_t deadlineMs = fspi::computeSpiDeadlineMs(length, currentSpeedHz_);
     uint64_t deadline = 0;
-    clock_interval_to_deadline(500, kMillisecondScale, &deadline);
+    clock_interval_to_deadline(deadlineMs, kMillisecondScale, &deadline);
 
     drainRxFifoLocked();
     setCsActiveLocked(true);
@@ -728,7 +857,69 @@ IOReturn FocalTechSPI::spiTransferInSharedBuffer(uint32_t length) {
     if (status != kIOReturnSuccess) {
         hwInitD0Locked();
     }
+    return status;
+}
+
+IOReturn FocalTechSPI::spiTransfer(uint32_t length,
+                                   IOMemoryDescriptor *inDesc,
+                                   const void *inInline,
+                                   IOMemoryDescriptor *outDesc,
+                                   void *outInline) {
+    if (length == 0u || length > kFocalTechSPIMaxTransfer || !hwLock_) {
+        return kIOReturnBadArgument;
+    }
+
+    bool inPrepared = false;
+    bool outPrepared = false;
+    if (inDesc) {
+        if (inDesc->prepare(kIODirectionOut) != kIOReturnSuccess) {
+            return kIOReturnVMError;
+        }
+        inPrepared = true;
+    }
+    if (outDesc) {
+        if (outDesc->prepare(kIODirectionIn) != kIOReturnSuccess) {
+            if (inPrepared) {
+                inDesc->complete(kIODirectionOut);
+            }
+            return kIOReturnVMError;
+        }
+        outPrepared = true;
+    }
+
+    IOLockLock(hwLock_);
+    IOReturn status = kIOReturnSuccess;
+    if (!sharedBufBytes_) {
+        status = kIOReturnNotReady;
+    } else if (inDesc) {
+        if (inDesc->readBytes(0, sharedBufBytes_, length) != length) {
+            status = kIOReturnVMError;
+        }
+    } else if (inInline) {
+        memcpy(sharedBufBytes_, inInline, length);
+    }
+
+    if (status == kIOReturnSuccess) {
+        status = spiTransferLocked(length);
+    }
+
+    if (status == kIOReturnSuccess) {
+        if (outDesc) {
+            if (outDesc->writeBytes(0, sharedBufBytes_, length) != length) {
+                status = kIOReturnVMError;
+            }
+        } else if (outInline) {
+            memcpy(outInline, sharedBufBytes_, length);
+        }
+    }
     IOLockUnlock(hwLock_);
+
+    if (outPrepared) {
+        outDesc->complete(kIODirectionIn);
+    }
+    if (inPrepared) {
+        inDesc->complete(kIODirectionOut);
+    }
     return status;
 }
 
@@ -742,6 +933,11 @@ IOReturn FocalTechSPI::gatedWaitIrqAction(OSObject *owner, void *arg0, void * /*
 }
 
 IOReturn FocalTechSPI::waitIrqGated(WaitIrqArgs *args) {
+    if (shuttingDown_ || isInactive() || !hasActiveClientGated_) {
+        return kIOReturnAborted;
+    }
+
+    drainPendingIrqEdgesGated();
     uint32_t curPin = readIrqPinLevel();
     if (curPin != lastSampledIrqLevel_) {
         lastSampledIrqLevel_ = curPin;
@@ -761,15 +957,14 @@ IOReturn FocalTechSPI::waitIrqGated(WaitIrqArgs *args) {
     uint64_t finalDeadline = 0;
     clock_interval_to_deadline(cappedTimeoutMs, kMillisecondScale, &finalDeadline);
 
-    while (!isInactive()) {
+    ++inFlightWaiters_;
+    while (!isInactive() && !shuttingDown_ && hasActiveClientGated_) {
         const uint64_t now = mach_absolute_time();
         if (now >= finalDeadline) {
             break;
         }
 
-        // If hardware interrupt delivery via VoodooGPIO has fired at least once,
-        // sleep in 50 ms slices; otherwise sample PAD_CFG_DW0 every 4 ms during active wait.
-        const uint32_t sliceMs = (hwIrqDeliveredCount_ > 0u) ? 50u : 4u;
+        const uint32_t sliceMs = (hwIrqDeliveredCount_ > 0) ? 50u : 4u;
         AbsoluteTime sliceDeadline{};
         clock_interval_to_deadline(sliceMs, kMillisecondScale, reinterpret_cast<uint64_t *>(&sliceDeadline));
         if (*reinterpret_cast<uint64_t *>(&sliceDeadline) > finalDeadline) {
@@ -777,6 +972,11 @@ IOReturn FocalTechSPI::waitIrqGated(WaitIrqArgs *args) {
         }
 
         const IOReturn sleepRc = commandGate_->commandSleep(&irqWaitToken_, sliceDeadline, THREAD_ABORTSAFE);
+        if (shuttingDown_ || isInactive() || !hasActiveClientGated_) {
+            break;
+        }
+
+        drainPendingIrqEdgesGated();
         curPin = readIrqPinLevel();
         if (curPin != lastSampledIrqLevel_) {
             lastSampledIrqLevel_ = curPin;
@@ -790,6 +990,14 @@ IOReturn FocalTechSPI::waitIrqGated(WaitIrqArgs *args) {
         if (sleepRc == THREAD_INTERRUPTED) {
             break;
         }
+    }
+    --inFlightWaiters_;
+    if (shuttingDown_ && inFlightWaiters_ == 0u) {
+        commandGate_->commandWakeup(&drainToken_, false);
+    }
+
+    if (shuttingDown_ || isInactive() || !hasActiveClientGated_) {
+        return kIOReturnAborted;
     }
 
     args->outIrqSeq = lease_.irqSeq();

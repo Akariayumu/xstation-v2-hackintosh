@@ -158,6 +158,36 @@ void testSessionLeaseSleepRollover() {
     assert(kFocalTechSPIWaitGenMismatch == 2u);
 }
 
+void testHidFilterBatchIrqEdgesAndTransferDeadline() {
+    // I1: Only FTE3600 ACPI _HID is accepted (reject GXFP3200 / ELAN8D02 / CSFP3511)
+    assert(fspi::isSupportedFpntHid("FTE3600"));
+    assert(!fspi::isSupportedFpntHid("GXFP3200"));
+    assert(!fspi::isSupportedFpntHid("ELAN8D02"));
+    assert(!fspi::isSupportedFpntHid(""));
+    assert(!fspi::isSupportedFpntHid(nullptr));
+
+    // C1: Batch atomic IRQ edge drain in gated context
+    fspi::SessionLease lease;
+    lease.recordIrqEdges(3u);
+    assert(lease.irqSeq() == 3u);
+    assert(lease.classifyWait(0u, lease.generation()) == kFocalTechSPIWaitEdge);
+
+    // I2: 64 KB transfer at 1 MHz (~524 ms wire time) must have > 900 ms deadline
+    const uint32_t deadline1m = fspi::computeSpiDeadlineMs(65536u, 1000000u);
+    assert(deadline1m >= 1000u);
+    const uint32_t deadline4m = fspi::computeSpiDeadlineMs(65536u, 4000000u);
+    assert(deadline4m >= 600u && deadline4m < deadline1m);
+
+    // I1: IRQ PAD_CFG_DW0 routing helper configures EdgeBoth / EdgeActiveLow + IOxAPIC route
+    fspi::FpntResources resBoth{};
+    resBoth.irqEdgeTriggered = true;
+    resBoth.irqActiveBoth = true;
+    const uint32_t dw0Both = fspi::configureIrqPadDw0(0x04000C00u, resBoth);
+    assert((dw0Both & (0x3u << 25)) == (0x3u << 25));  // RXEVCFG = 3 (Both edges)
+    assert((dw0Both & (1u << 20)) != 0u);              // GPIROUTIOXAPIC = 1
+    assert((dw0Both & (0xFu << 10)) == 0u);            // PMODE = 0 (GPIO)
+}
+
 }  // namespace
 
 int main() {
@@ -166,6 +196,7 @@ int main() {
     testResolveTglLpGpioGnum();
     testComputeSscr0();
     testSessionLeaseSleepRollover();
+    testHidFilterBatchIrqEdgesAndTransferDeadline();
     std::printf("All FocalTechSPIPure tests passed\n");
     return 0;
 }

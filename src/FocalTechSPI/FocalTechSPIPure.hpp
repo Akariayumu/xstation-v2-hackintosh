@@ -20,13 +20,14 @@ static constexpr uint32_t kMinSpiSpeedHz        = 1000000u;
 static constexpr uint32_t kMaxSpiSpeedHz        = 8000000u;
 
 // LPSS_CNL_SSP MMIO register offsets (PCI BAR0)
-static constexpr uint32_t kRegSscr0          = 0x000u;
-static constexpr uint32_t kRegSscr1          = 0x004u;
-static constexpr uint32_t kRegSssr           = 0x008u;
-static constexpr uint32_t kRegSsdr           = 0x010u;
-static constexpr uint32_t kRegLpssPrivResets = 0x204u;
-static constexpr uint32_t kRegLpssCsControl  = 0x224u;
-static constexpr uint32_t kRegLpssClockGate  = 0x238u;
+static constexpr uint32_t kRegSscr0               = 0x000u;
+static constexpr uint32_t kRegSscr1               = 0x004u;
+static constexpr uint32_t kRegSssr                = 0x008u;
+static constexpr uint32_t kRegSsdr                = 0x010u;
+static constexpr uint32_t kRegLpssPrivClockParams = 0x200u;
+static constexpr uint32_t kRegLpssPrivResets      = 0x204u;
+static constexpr uint32_t kRegLpssCsControl       = 0x224u;
+static constexpr uint32_t kRegLpssClockGate       = 0x238u;
 
 // SSSR bit definitions
 static constexpr uint32_t kSssrTnf = (1u << 2);  // Transmit FIFO Not Full
@@ -45,8 +46,26 @@ static constexpr uint32_t kLpssCsHigh          = (1u << 1);
 static constexpr uint32_t kLpssClockGateForceOn = 0x03u;
 
 // Intel PCH PAD_CFG_DW0 bits
-static constexpr uint32_t kPadCfgDw0GpioTxState = (1u << 0);
-static constexpr uint32_t kPadCfgDw0GpioRxState = (1u << 1);
+static constexpr uint32_t kPadCfgDw0GpioTxState   = (1u << 0);
+static constexpr uint32_t kPadCfgDw0GpioRxState   = (1u << 1);
+static constexpr uint32_t kPadCfgDw0GpioTxDis     = (1u << 8);
+static constexpr uint32_t kPadCfgDw0GpioRxDis     = (1u << 9);
+static constexpr uint32_t kPadCfgDw0PmodeMask     = (0xFu << 10);
+static constexpr uint32_t kPadCfgDw0RoutMask      = (0xFu << 17);
+static constexpr uint32_t kPadCfgDw0RoutSci       = (1u << 19);
+static constexpr uint32_t kPadCfgDw0RoutIoApic    = (1u << 20);
+static constexpr uint32_t kPadCfgDw0RxInv         = (1u << 23);
+static constexpr uint32_t kPadCfgDw0RxEvCfgShift  = 25u;
+static constexpr uint32_t kPadCfgDw0RxEvCfgMask   = (0x3u << 25);
+
+inline bool isSupportedFpntHid(const char *hid) {
+    if (!hid) {
+        return false;
+    }
+    return hid[0] == 'F' && hid[1] == 'T' && hid[2] == 'E' &&
+           hid[3] == '3' && hid[4] == '6' && hid[5] == '0' &&
+           hid[6] == '0' && hid[7] == '\0';
+}
 
 struct FpntResources {
     uint32_t speedHz;
@@ -277,6 +296,34 @@ inline uint32_t computeSscr1(uint8_t spiMode) {
     return val;
 }
 
+inline uint32_t computeSpiDeadlineMs(uint32_t length, uint32_t speedHz) {
+    const uint32_t clampedHz = clampSpiSpeedHz(speedHz);
+    const uint64_t wireMarginMs =
+        (static_cast<uint64_t>(length) * 10000ull + clampedHz - 1ull) / clampedHz;
+    const uint64_t totalMs = 500ull + wireMarginMs;
+    return (totalMs > 10000ull) ? 10000u : static_cast<uint32_t>(totalMs);
+}
+
+inline uint32_t configureIrqPadDw0(uint32_t dw0, const FpntResources &res) {
+    uint32_t val = dw0;
+    val &= ~(kPadCfgDw0PmodeMask | kPadCfgDw0GpioRxDis |
+             kPadCfgDw0RoutMask | kPadCfgDw0RxInv | kPadCfgDw0RxEvCfgMask);
+    val |= kPadCfgDw0GpioTxDis | kPadCfgDw0RoutIoApic;
+    if (res.irqEdgeTriggered) {
+        if (res.irqActiveBoth) {
+            val |= (0x3u << kPadCfgDw0RxEvCfgShift);
+        } else {
+            val |= (0x1u << kPadCfgDw0RxEvCfgShift);
+            if (res.irqActiveLow) {
+                val |= kPadCfgDw0RxInv;
+            }
+        }
+    } else if (res.irqActiveLow) {
+        val |= kPadCfgDw0RxInv;
+    }
+    return val;
+}
+
 class SessionLease {
 public:
     SessionLease() : generation_(1u), irqSeq_(0u) {}
@@ -285,6 +332,7 @@ public:
     uint32_t irqSeq() const { return irqSeq_; }
 
     void recordIrqEdge() { ++irqSeq_; }
+    void recordIrqEdges(uint32_t count) { irqSeq_ += count; }
 
     void onSleep() {
         ++generation_;
