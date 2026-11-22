@@ -1,0 +1,824 @@
+// SPDX-License-Identifier: BSD-3-Clause
+#include "FocalTechSPI.hpp"
+#include "FocalTechSPIUserClient.hpp"
+
+#include <IOKit/IOLib.h>
+#include <IOKit/IORegistryEntry.h>
+#include <IOKit/pwr_mgt/IOPM.h>
+#include <IOKit/pwr_mgt/IOPMpowerState.h>
+#include <kern/clock.h>
+#include <libkern/OSAtomic.h>
+#include <libkern/c++/OSData.h>
+#include <libkern/c++/OSNumber.h>
+#include <libkern/c++/OSString.h>
+#include <pexpert/pexpert.h>
+#include <string.h>
+
+#define FSPI_LOG(fmt, ...) IOLog("FocalTechSPI: " fmt "\n", ##__VA_ARGS__)
+
+namespace {
+
+enum {
+    kPowerStateSleep = 0,
+    kPowerStateAwake = 1,
+    kPowerStateCount = 2
+};
+
+static IOPMPowerState gPowerStates[kPowerStateCount] = {
+    {kIOPMPowerStateVersion1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {kIOPMPowerStateVersion1, kIOPMPowerOn | kIOPMDeviceUsable, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0},
+};
+
+}  // namespace
+
+OSDefineMetaClassAndStructors(FocalTechSPI, IOService)
+
+bool FocalTechSPI::init(OSDictionary *dictionary) {
+    if (!IOService::init(dictionary)) {
+        return false;
+    }
+    hwLock_ = IOLockAlloc();
+    clientLock_ = IOLockAlloc();
+    return (hwLock_ != nullptr && clientLock_ != nullptr);
+}
+
+bool FocalTechSPI::locateAndParseAcpiFpnt(IOPCIDevice *pci) {
+    const IORegistryPlane *acpiPlane = IORegistryEntry::getPlane("IOACPIPlane");
+    if (!acpiPlane) {
+        FSPI_LOG("IOACPIPlane unavailable");
+        return false;
+    }
+
+    // First try PCI device's linked acpi-device ("SPI1")
+    if (IOACPIPlatformDevice *spiAcpi = OSDynamicCast(IOACPIPlatformDevice, pci->getProperty("acpi-device"))) {
+        OSIterator *children = spiAcpi->getChildIterator(acpiPlane);
+        if (children) {
+            while (OSObject *obj = children->getNextObject()) {
+                IOACPIPlatformDevice *cand = OSDynamicCast(IOACPIPlatformDevice, obj);
+                if (cand && cand->getName() && strcmp(cand->getName(), "FPNT") == 0) {
+                    cand->retain();
+                    fpntDevice_ = cand;
+                    break;
+                }
+            }
+            children->release();
+        }
+    }
+
+    // Fallback recursive scan on IOACPIPlane for SPI1 -> FPNT and GPI0
+    IORegistryIterator *it = IORegistryIterator::iterateOver(acpiPlane, kIORegistryIterateRecursively);
+    if (it) {
+        while (IORegistryEntry *entry = it->getNextObject()) {
+            IOACPIPlatformDevice *adev = OSDynamicCast(IOACPIPlatformDevice, entry);
+            if (!adev || !adev->getName()) {
+                continue;
+            }
+            if (!fpntDevice_ && strcmp(adev->getName(), "FPNT") == 0) {
+                IORegistryEntry *parent = adev->getParentEntry(acpiPlane);
+                if (parent && parent->getName() && strcmp(parent->getName(), "SPI1") == 0) {
+                    adev->retain();
+                    fpntDevice_ = adev;
+                }
+            } else if (!gpi0Device_ && strcmp(adev->getName(), "GPI0") == 0) {
+                adev->retain();
+                gpi0Device_ = adev;
+            }
+        }
+        it->release();
+    }
+
+    if (!fpntDevice_) {
+        FSPI_LOG("ACPI child FPNT under SPI1 not found");
+        return false;
+    }
+    if (!gpi0Device_) {
+        FSPI_LOG("ACPI GPI0 (INT34C5) device not found");
+        return false;
+    }
+
+    UInt32 sta = 0;
+    if (fpntDevice_->evaluateInteger("_STA", &sta) == kIOReturnSuccess && (sta & 0x0Fu) != 0x0Fu) {
+        FSPI_LOG("FPNT _STA=0x%x not active; refusing to attach", static_cast<unsigned>(sta));
+        return false;
+    }
+
+    OSObject *crsObj = nullptr;
+    if (fpntDevice_->evaluateObject("_CRS", &crsObj) != kIOReturnSuccess || !crsObj) {
+        FSPI_LOG("Failed to evaluate FPNT._CRS");
+        return false;
+    }
+    OSData *crsData = OSDynamicCast(OSData, crsObj);
+    bool ok = false;
+    if (crsData && crsData->getBytesNoCopy() && crsData->getLength() > 0) {
+        ok = fspi::parseFpntCrs(
+             static_cast<const uint8_t *>(crsData->getBytesNoCopy()),
+            crsData->getLength(),
+            &res_);
+    }
+    crsObj->release();
+    if (!ok) {
+        FSPI_LOG("Malformed or unsupported FPNT._CRS buffer");
+        return false;
+    }
+
+    if (!fspi::resolveTglLpGpioGnum(res_.resetGnum, &resetBarIdx_, &resetPadOffset_) ||
+        !fspi::resolveTglLpGpioGnum(res_.irqGnum, &irqBarIdx_, &irqPadOffset_)) {
+        FSPI_LOG("GPIO GNUM out of range (reset=%u irq=%u)", res_.resetGnum, res_.irqGnum);
+        return false;
+    }
+
+    currentSpeedHz_ = fspi::clampSpiSpeedHz(res_.speedHz);
+    currentMode_ = res_.spiMode;
+    csIdleReg_ = fspi::kLpssCsSwMode | (res_.csPolarityHigh ? 0u : fspi::kLpssCsHigh);
+    csActiveReg_ = fspi::kLpssCsSwMode | (res_.csPolarityHigh ? fspi::kLpssCsHigh : 0u);
+    return true;
+}
+
+bool FocalTechSPI::mapGpioCommunities() {
+    const uint32_t neededBars[2] = {resetBarIdx_, irqBarIdx_};
+    for (size_t i = 0; i < 2; ++i) {
+        const uint32_t barIdx = neededBars[i];
+        if (barIdx >= 4u) {
+            return false;
+        }
+        if (gpioBarMaps_[barIdx] != nullptr) {
+            continue;
+        }
+        IODeviceMemory *mem = gpi0Device_->getDeviceMemoryWithIndex(barIdx);
+        if (!mem) {
+            FSPI_LOG("GPI0 missing IODeviceMemory index %u", barIdx);
+            return false;
+        }
+        IOMemoryMap *map = mem->map();
+        if (!map || map->getVirtualAddress() == 0) {
+            OSSafeReleaseNULL(map);
+            FSPI_LOG("Failed to map GPI0 BAR %u", barIdx);
+            return false;
+        }
+        gpioBarMaps_[barIdx] = map;
+    }
+
+    if (gpioBarMaps_[resetBarIdx_]->getLength() < resetPadOffset_ + 8u ||
+        gpioBarMaps_[irqBarIdx_]->getLength() < irqPadOffset_ + 8u) {
+        FSPI_LOG("GPI0 BAR length smaller than pad offset");
+        return false;
+    }
+    return true;
+}
+
+void FocalTechSPI::registerGpioInterrupt() {
+    if (!gpi0Device_) {
+        return;
+    }
+    OSIterator *children = gpi0Device_->getChildIterator(gIOServicePlane);
+    if (!children) {
+        return;
+    }
+    while (OSObject *obj = children->getNextObject()) {
+        IOService *svc = OSDynamicCast(IOService, obj);
+        if (!svc || !svc->getMetaClass() || !svc->getMetaClass()->getClassName()) {
+            continue;
+        }
+        const char *clsName = svc->getMetaClass()->getClassName();
+        if (strncmp(clsName, "VoodooGPIO", 10) == 0) {
+            svc->retain();
+            gpioIrqProvider_ = svc;
+            break;
+        }
+    }
+    children->release();
+
+    if (!gpioIrqProvider_) {
+        FSPI_LOG("VoodooGPIO child not found on GPI0; using gated PAD_CFG_DW0 edge sampling");
+        return;
+    }
+
+    const int pin = static_cast<int>(res_.irqGnum);
+    IOReturn rc = gpioIrqProvider_->registerInterrupt(pin, this, &FocalTechSPI::interruptOccurred, nullptr);
+    if (rc == kIOReturnSuccess) {
+        irqRegistered_ = true;
+        (void)gpioIrqProvider_->enableInterrupt(pin);
+        FSPI_LOG("Registered GPIO IRQ pin %d via %s", pin, gpioIrqProvider_->getMetaClass()->getClassName());
+    } else {
+        FSPI_LOG("VoodooGPIO registerInterrupt(%d) returned 0x%x; fallback edge sampling active", pin, rc);
+        OSSafeReleaseNULL(gpioIrqProvider_);
+    }
+}
+
+void FocalTechSPI::unregisterGpioInterrupt() {
+    if (irqRegistered_ && gpioIrqProvider_) {
+        const int pin = static_cast<int>(res_.irqGnum);
+        (void)gpioIrqProvider_->disableInterrupt(pin);
+        (void)gpioIrqProvider_->unregisterInterrupt(pin);
+        irqRegistered_ = false;
+    }
+    OSSafeReleaseNULL(gpioIrqProvider_);
+}
+
+uint32_t FocalTechSPI::mmioRead32(uint32_t offset) const {
+    return *reinterpret_cast<volatile const uint32_t *>(bar0_ + offset);
+}
+
+void FocalTechSPI::mmioWrite32(uint32_t offset, uint32_t value) {
+    *reinterpret_cast<volatile uint32_t *>(bar0_ + offset) = value;
+}
+
+void FocalTechSPI::setCsActiveLocked(bool active) {
+    mmioWrite32(fspi::kRegLpssCsControl, active ? csActiveReg_ : csIdleReg_);
+    // Tiger Lake LPSS cs_clk_stays_gated quirk: briefly force clock gate ON so CS
+    // state propagates immediately to the physical pad even while SSP is idle.
+    mmioWrite32(fspi::kRegLpssClockGate, fspi::kLpssClockGateForceOn);
+    (void)mmioRead32(fspi::kRegLpssCsControl);
+    IODelay(1);
+    mmioWrite32(fspi::kRegLpssClockGate, 0u);
+}
+
+void FocalTechSPI::drainRxFifoLocked() {
+    for (uint32_t i = 0; i < 256u; ++i) {
+        if ((mmioRead32(fspi::kRegSssr) & fspi::kSssrRne) == 0u) {
+            break;
+        }
+        (void)mmioRead32(fspi::kRegSsdr);
+    }
+    mmioWrite32(fspi::kRegSssr, fspi::kSssrRor);
+}
+
+void FocalTechSPI::restorePciD0Locked() {
+    if (!pciDevice_) {
+        return;
+    }
+    if (pmCapOffset_ != 0u) {
+        const UInt16 pmcsr = pciDevice_->configRead16(pmCapOffset_ + 4u);
+        if ((pmcsr & 0x03u) != 0u) {
+            pciDevice_->configWrite16(pmCapOffset_ + 4u, static_cast<UInt16>(pmcsr & ~0x03u));
+            IODelay(10000);  // 10 ms PCI D3hot -> D0 settle
+        }
+    }
+    const uint32_t curBar0 = pciDevice_->configRead32(kIOPCIConfigBaseAddress0);
+    if ((curBar0 & ~0xFu) == 0u && (savedBar0Low_ & ~0xFu) != 0u) {
+        pciDevice_->configWrite32(kIOPCIConfigBaseAddress0, savedBar0Low_);
+        if (bar0Is64Bit_) {
+            pciDevice_->configWrite32(kIOPCIConfigBaseAddress1, savedBar0High_);
+        }
+    }
+    pciDevice_->setMemoryEnable(true);
+    pciDevice_->setBusMasterEnable(true);
+}
+
+void FocalTechSPI::hwInitD0Locked() {
+    if (!bar0_) {
+        return;
+    }
+    mmioWrite32(fspi::kRegLpssPrivResets, fspi::kLpssResetRelease);
+    (void)mmioRead32(fspi::kRegLpssPrivResets);
+    IODelay(10);
+
+    mmioWrite32(fspi::kRegSscr0, 0u);
+    (void)mmioRead32(fspi::kRegSscr0);
+    drainRxFifoLocked();
+    setCsActiveLocked(false);
+
+    mmioWrite32(fspi::kRegSscr1, fspi::computeSscr1(currentMode_));
+    mmioWrite32(fspi::kRegSscr0, fspi::computeSscr0(fspi::kTglLpssSpiSrcClockHz, currentSpeedHz_));
+    (void)mmioRead32(fspi::kRegSscr0);
+}
+
+void FocalTechSPI::hwEnterD3Locked() {
+    if (bar0_) {
+        setCsActiveLocked(false);
+        mmioWrite32(fspi::kRegSscr0, 0u);
+        mmioWrite32(fspi::kRegLpssPrivResets, 0u);
+        (void)mmioRead32(fspi::kRegLpssPrivResets);
+    }
+    if (pciDevice_ && pmCapOffset_ != 0u) {
+        const UInt16 pmcsr = pciDevice_->configRead16(pmCapOffset_ + 4u);
+        if ((pmcsr & 0x03u) != 0x03u) {
+            pciDevice_->configWrite16(pmCapOffset_ + 4u, static_cast<UInt16>((pmcsr & ~0x03u) | 0x03u));
+        }
+    }
+}
+
+uint32_t FocalTechSPI::readIrqPinLevel() const {
+    IOMemoryMap *map = (irqBarIdx_ < 4u) ? gpioBarMaps_[irqBarIdx_] : nullptr;
+    if (!map || map->getVirtualAddress() == 0) {
+        return 0u;
+    }
+    const volatile uint32_t *dw0 = reinterpret_cast<const volatile uint32_t *>(
+        reinterpret_cast<const volatile uint8_t *>(map->getVirtualAddress()) + irqPadOffset_);
+    return ((*dw0 & fspi::kPadCfgDw0GpioRxState) != 0u) ? 1u : 0u;
+}
+
+bool FocalTechSPI::start(IOService *provider) {
+    if (!IOService::start(provider)) {
+        return false;
+    }
+
+    int offArg = 0;
+    if (PE_parse_boot_argn("-fspioff", &offArg, sizeof(offArg))) {
+        FSPI_LOG("Disabled by -fspioff boot-arg");
+        return false;
+    }
+
+    pciDevice_ = OSDynamicCast(IOPCIDevice, provider);
+    if (!pciDevice_) {
+        FSPI_LOG("Provider is not IOPCIDevice");
+        return false;
+    }
+    pciDevice_->retain();
+
+    if (!locateAndParseAcpiFpnt(pciDevice_)) {
+        stop(provider);
+        return false;
+    }
+    if (!mapGpioCommunities()) {
+        stop(provider);
+        return false;
+    }
+
+    pciDevice_->findPCICapability(kIOPCIPowerManagementCapability, &pmCapOffset_);
+    (void)pciDevice_->enablePCIPowerManagement(kPCIPMCSPowerStateD3);
+
+    IOLockLock(hwLock_);
+    restorePciD0Locked();
+    savedBar0Low_ = pciDevice_->configRead32(kIOPCIConfigBaseAddress0);
+    bar0Is64Bit_ = ((savedBar0Low_ & 0x06u) == 0x04u);
+    if (bar0Is64Bit_) {
+        savedBar0High_ = pciDevice_->configRead32(kIOPCIConfigBaseAddress1);
+    }
+    IOLockUnlock(hwLock_);
+
+    bar0Map_ = pciDevice_->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
+    if (!bar0Map_ || bar0Map_->getVirtualAddress() == 0 || bar0Map_->getLength() < 0x240u) {
+        FSPI_LOG("Failed to map PCI BAR0 MMIO");
+        stop(provider);
+        return false;
+    }
+    bar0_ = reinterpret_cast<volatile uint8_t *>(bar0Map_->getVirtualAddress());
+
+    sharedBuf_ = IOBufferMemoryDescriptor::inTaskWithOptions(
+        kernel_task,
+        kIOMemoryKernelUserShared | kIODirectionInOut,
+        kFocalTechSPIMaxTransfer,
+        page_size);
+    if (!sharedBuf_ || !sharedBuf_->getBytesNoCopy()) {
+        FSPI_LOG("Failed to allocate 64 KB shared transfer buffer");
+        stop(provider);
+        return false;
+    }
+    sharedBufBytes_ = static_cast<uint8_t *>(sharedBuf_->getBytesNoCopy());
+    bzero(sharedBufBytes_, kFocalTechSPIMaxTransfer);
+
+    workLoop_ = IOWorkLoop::workLoop();
+    if (!workLoop_) {
+        FSPI_LOG("Failed to create IOWorkLoop");
+        stop(provider);
+        return false;
+    }
+    commandGate_ = IOCommandGate::commandGate(this);
+    if (!commandGate_ || workLoop_->addEventSource(commandGate_) != kIOReturnSuccess) {
+        FSPI_LOG("Failed to attach IOCommandGate");
+        stop(provider);
+        return false;
+    }
+
+    IOLockLock(hwLock_);
+    hwInitD0Locked();
+    powerState_ = 1u;
+    IOLockUnlock(hwLock_);
+
+    lastSampledIrqLevel_ = readIrqPinLevel();
+    registerGpioInterrupt();
+
+    PMinit();
+    provider->joinPMtree(this);
+    pmInitialized_ = true;
+    registerPowerDriver(this, gPowerStates, kPowerStateCount);
+
+    setProperty("ACPI HID", "FTE3600");
+    setProperty("SPI Speed Hz", static_cast<unsigned long long>(currentSpeedHz_), 32);
+    setProperty("Reset GNUM", static_cast<unsigned long long>(res_.resetGnum), 32);
+    setProperty("IRQ GNUM", static_cast<unsigned long long>(res_.irqGnum), 32);
+    setProperty("IRQ Hardware Registered", irqRegistered_);
+
+    registerService();
+    FSPI_LOG("Attached to 8086:a0ab (FPNT FTE3600 speed=%u Hz reset=%u irq=%u)",
+             currentSpeedHz_, res_.resetGnum, res_.irqGnum);
+    return true;
+}
+
+void FocalTechSPI::stop(IOService *provider) {
+    if (pmInitialized_) {
+        PMstop();
+        pmInitialized_ = false;
+    }
+
+    unregisterGpioInterrupt();
+
+    if (commandGate_) {
+        commandGate_->commandWakeup(&irqWaitToken_, false);
+        if (workLoop_) {
+            workLoop_->removeEventSource(commandGate_);
+        }
+        OSSafeReleaseNULL(commandGate_);
+    }
+    OSSafeReleaseNULL(workLoop_);
+
+    if (hwLock_) {
+        IOLockLock(hwLock_);
+        powerState_ = 0u;
+        hwEnterD3Locked();
+        bar0_ = nullptr;
+        IOLockUnlock(hwLock_);
+    }
+
+    sharedBufBytes_ = nullptr;
+    OSSafeReleaseNULL(sharedBuf_);
+    OSSafeReleaseNULL(bar0Map_);
+    for (size_t i = 0; i < 4; ++i) {
+        OSSafeReleaseNULL(gpioBarMaps_[i]);
+    }
+    OSSafeReleaseNULL(fpntDevice_);
+    OSSafeReleaseNULL(gpi0Device_);
+    OSSafeReleaseNULL(pciDevice_);
+
+    IOService::stop(provider);
+}
+
+void FocalTechSPI::free() {
+    if (hwLock_) {
+        IOLockFree(hwLock_);
+        hwLock_ = nullptr;
+    }
+    if (clientLock_) {
+        IOLockFree(clientLock_);
+        clientLock_ = nullptr;
+    }
+    IOService::free();
+}
+
+IOReturn FocalTechSPI::setPowerState(unsigned long powerStateOrdinal, IOService * /*whatDevice*/) {
+    if (!hwLock_) {
+        return IOPMAckImplied;
+    }
+
+    if (powerStateOrdinal == kPowerStateSleep) {
+        if (commandGate_) {
+            (void)commandGate_->runAction(&FocalTechSPI::gatedSleepRolloverAction);
+        }
+        IOLockLock(hwLock_);
+        if (powerState_ != 0u) {
+            powerState_ = 0u;
+            hwEnterD3Locked();
+        }
+        IOLockUnlock(hwLock_);
+    } else {
+        IOLockLock(hwLock_);
+        if (powerState_ == 0u) {
+            restorePciD0Locked();
+            hwInitD0Locked();
+            powerState_ = 1u;
+        }
+        IOLockUnlock(hwLock_);
+        if (commandGate_) {
+            (void)commandGate_->runAction(&FocalTechSPI::gatedWakeRefreshAction);
+        }
+    }
+    return IOPMAckImplied;
+}
+
+IOReturn FocalTechSPI::newUserClient(task_t owningTask,
+                                     void *securityID,
+                                     UInt32 type,
+                                     OSDictionary *properties,
+                                     IOUserClient **handler) {
+    if (!handler) {
+        return kIOReturnBadArgument;
+    }
+    *handler = nullptr;
+
+    if (IOUserClient::clientHasPrivilege(securityID, kIOClientPrivilegeAdministrator) != kIOReturnSuccess) {
+        return kIOReturnNotPrivileged;
+    }
+
+    FocalTechSPIUserClient *client = OSTypeAlloc(FocalTechSPIUserClient);
+    if (!client) {
+        return kIOReturnNoMemory;
+    }
+    if (!client->initWithTask(owningTask, securityID, type, properties)) {
+        client->release();
+        return kIOReturnBadArgument;
+    }
+    if (!client->attach(this)) {
+        client->release();
+        return kIOReturnInternalError;
+    }
+    if (!client->start(this)) {
+        client->detach(this);
+        client->release();
+        return kIOReturnExclusiveAccess;
+    }
+
+    *handler = client;
+    return kIOReturnSuccess;
+}
+
+IOReturn FocalTechSPI::newUserClient(task_t owningTask,
+                                     void *securityID,
+                                     UInt32 type,
+                                     IOUserClient **handler) {
+    return newUserClient(owningTask, securityID, type, nullptr, handler);
+}
+
+bool FocalTechSPI::acquireClientSession(FocalTechSPIUserClient *client) {
+    if (!client || !clientLock_) {
+        return false;
+    }
+    bool acquired = false;
+    IOLockLock(clientLock_);
+    if (activeClient_ == nullptr) {
+        activeClient_ = client;
+        acquired = true;
+    }
+    IOLockUnlock(clientLock_);
+    return acquired;
+}
+
+void FocalTechSPI::releaseClientSession(FocalTechSPIUserClient *client) {
+    if (!client || !clientLock_) {
+        return;
+    }
+    bool released = false;
+    IOLockLock(clientLock_);
+    if (activeClient_ == client) {
+        activeClient_ = nullptr;
+        released = true;
+    }
+    IOLockUnlock(clientLock_);
+
+    if (released && commandGate_) {
+        commandGate_->commandWakeup(&irqWaitToken_, false);
+    }
+}
+
+void FocalTechSPI::interruptOccurred(OSObject *owner, void * /*refCon*/, IOService * /*nub*/, int /*source*/) {
+    FocalTechSPI *self = OSDynamicCast(FocalTechSPI, owner);
+    if (!self || !self->commandGate_) {
+        return;
+    }
+    OSIncrementAtomic(&self->hwIrqDeliveredCount_);
+    (void)self->commandGate_->attemptAction(&FocalTechSPI::gatedIrqEdgeAction);
+    self->commandGate_->commandWakeup(&self->irqWaitToken_, false);
+}
+
+IOReturn FocalTechSPI::gatedReadLeaseAction(OSObject *owner, void *arg0, void * /*arg1*/, void * /*arg2*/, void * /*arg3*/) {
+    FocalTechSPI *self = OSDynamicCast(FocalTechSPI, owner);
+    uint32_t *outGen = static_cast<uint32_t *>(arg0);
+    if (self && outGen) {
+        *outGen = self->lease_.generation();
+    }
+    return kIOReturnSuccess;
+}
+
+IOReturn FocalTechSPI::gatedSleepRolloverAction(OSObject *owner, void * /*arg0*/, void * /*arg1*/, void * /*arg2*/, void * /*arg3*/) {
+    FocalTechSPI *self = OSDynamicCast(FocalTechSPI, owner);
+    if (self) {
+        self->lease_.onSleep();
+        if (self->commandGate_) {
+            self->commandGate_->commandWakeup(&self->irqWaitToken_, false);
+        }
+    }
+    return kIOReturnSuccess;
+}
+
+IOReturn FocalTechSPI::gatedWakeRefreshAction(OSObject *owner, void * /*arg0*/, void * /*arg1*/, void * /*arg2*/, void * /*arg3*/) {
+    FocalTechSPI *self = OSDynamicCast(FocalTechSPI, owner);
+    if (self) {
+        self->lastSampledIrqLevel_ = self->readIrqPinLevel();
+        if (self->commandGate_) {
+            self->commandGate_->commandWakeup(&self->irqWaitToken_, false);
+        }
+    }
+    return kIOReturnSuccess;
+}
+
+IOReturn FocalTechSPI::gatedIrqEdgeAction(OSObject *owner, void * /*arg0*/, void * /*arg1*/, void * /*arg2*/, void * /*arg3*/) {
+    FocalTechSPI *self = OSDynamicCast(FocalTechSPI, owner);
+    if (self) {
+        self->lastSampledIrqLevel_ = self->readIrqPinLevel();
+        self->lease_.recordIrqEdge();
+    }
+    return kIOReturnSuccess;
+}
+
+IOReturn FocalTechSPI::getHwInfo(FocalTechSPIHwInfo *outInfo) {
+    if (!outInfo) {
+        return kIOReturnBadArgument;
+    }
+    uint32_t gen = 0;
+    if (commandGate_) {
+        (void)commandGate_->runAction(&FocalTechSPI::gatedReadLeaseAction, &gen);
+    }
+    IOLockLock(hwLock_);
+    outInfo->abiVersion = kFocalTechSPIAbiVersion;
+    outInfo->sessionGeneration = gen;
+    outInfo->acpiSpeedHz = currentSpeedHz_;
+    outInfo->resetGnum = res_.resetGnum;
+    outInfo->irqGnum = res_.irqGnum;
+    outInfo->spiMode = currentMode_;
+    outInfo->irqActiveLow = res_.irqActiveLow ? 1u : 0u;
+    outInfo->powerState = powerState_;
+    outInfo->reserved = 0u;
+    IOLockUnlock(hwLock_);
+    return kIOReturnSuccess;
+}
+
+IOReturn FocalTechSPI::setResetPin(uint32_t level) {
+    IOMemoryMap *map = (resetBarIdx_ < 4u) ? gpioBarMaps_[resetBarIdx_] : nullptr;
+    if (!map || map->getVirtualAddress() == 0) {
+        return kIOReturnNotReady;
+    }
+    IOLockLock(hwLock_);
+    if (powerState_ == 0u) {
+        IOLockUnlock(hwLock_);
+        return kIOReturnNotReady;
+    }
+    volatile uint32_t *dw0 = reinterpret_cast<volatile uint32_t *>(
+        reinterpret_cast<volatile uint8_t *>(map->getVirtualAddress()) + resetPadOffset_);
+    uint32_t val = *dw0;
+    if (level != 0u) {
+        val |= fspi::kPadCfgDw0GpioTxState;
+    } else {
+        val &= ~fspi::kPadCfgDw0GpioTxState;
+    }
+    *dw0 = val;
+    (void)*dw0;
+    IOLockUnlock(hwLock_);
+    return kIOReturnSuccess;
+}
+
+IOReturn FocalTechSPI::setSpiConfig(uint32_t speedHz, uint8_t spiMode) {
+    if (spiMode > 3u) {
+        return kIOReturnBadArgument;
+    }
+    IOLockLock(hwLock_);
+    currentSpeedHz_ = fspi::clampSpiSpeedHz(speedHz);
+    currentMode_ = spiMode;
+    if (powerState_ != 0u && bar0_ != nullptr) {
+        hwInitD0Locked();
+    }
+    IOLockUnlock(hwLock_);
+    return kIOReturnSuccess;
+}
+
+IOReturn FocalTechSPI::spiTransferInSharedBuffer(uint32_t length) {
+    if (length == 0u || length > kFocalTechSPIMaxTransfer || !sharedBufBytes_) {
+        return kIOReturnBadArgument;
+    }
+
+    IOLockLock(hwLock_);
+    if (powerState_ == 0u || !bar0_) {
+        IOLockUnlock(hwLock_);
+        return kIOReturnNotReady;
+    }
+
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(500, kMillisecondScale, &deadline);
+
+    drainRxFifoLocked();
+    setCsActiveLocked(true);
+
+    uint32_t txIdx = 0;
+    uint32_t rxIdx = 0;
+    IOReturn status = kIOReturnSuccess;
+
+    while (rxIdx < length) {
+        bool progressed = false;
+
+        while (txIdx < length && (txIdx - rxIdx) < 32u &&
+               (mmioRead32(fspi::kRegSssr) & fspi::kSssrTnf) != 0u) {
+            mmioWrite32(fspi::kRegSsdr, sharedBufBytes_[txIdx++]);
+            progressed = true;
+        }
+
+        while (rxIdx < txIdx && (mmioRead32(fspi::kRegSssr) & fspi::kSssrRne) != 0u) {
+            sharedBufBytes_[rxIdx++] = static_cast<uint8_t>(mmioRead32(fspi::kRegSsdr) & 0xFFu);
+            progressed = true;
+        }
+
+        if (!progressed) {
+            if (mach_absolute_time() > deadline) {
+                status = kIOReturnTimeout;
+                break;
+            }
+            IODelay(1);
+        }
+    }
+
+    if (status == kIOReturnSuccess) {
+        while ((mmioRead32(fspi::kRegSssr) & fspi::kSssrBsy) != 0u) {
+            if (mach_absolute_time() > deadline) {
+                status = kIOReturnTimeout;
+                break;
+            }
+            IODelay(1);
+        }
+    }
+
+    setCsActiveLocked(false);
+    if (status != kIOReturnSuccess) {
+        hwInitD0Locked();
+    }
+    IOLockUnlock(hwLock_);
+    return status;
+}
+
+IOReturn FocalTechSPI::gatedWaitIrqAction(OSObject *owner, void *arg0, void * /*arg1*/, void * /*arg2*/, void * /*arg3*/) {
+    FocalTechSPI *self = OSDynamicCast(FocalTechSPI, owner);
+    WaitIrqArgs *args = static_cast<WaitIrqArgs *>(arg0);
+    if (!self || !args) {
+        return kIOReturnBadArgument;
+    }
+    return self->waitIrqGated(args);
+}
+
+IOReturn FocalTechSPI::waitIrqGated(WaitIrqArgs *args) {
+    uint32_t curPin = readIrqPinLevel();
+    if (curPin != lastSampledIrqLevel_) {
+        lastSampledIrqLevel_ = curPin;
+        lease_.recordIrqEdge();
+    }
+
+    uint32_t status = lease_.classifyWait(args->lastSeq, args->expectedGen);
+    if (status != kFocalTechSPIWaitTimeout || args->timeoutMs == 0u) {
+        args->outIrqSeq = lease_.irqSeq();
+        args->outCurrentGen = lease_.generation();
+        args->outPinLevel = curPin;
+        args->outWaitStatus = status;
+        return kIOReturnSuccess;
+    }
+
+    const uint32_t cappedTimeoutMs = (args->timeoutMs > 60000u) ? 60000u : args->timeoutMs;
+    uint64_t finalDeadline = 0;
+    clock_interval_to_deadline(cappedTimeoutMs, kMillisecondScale, &finalDeadline);
+
+    while (!isInactive()) {
+        const uint64_t now = mach_absolute_time();
+        if (now >= finalDeadline) {
+            break;
+        }
+
+        // If hardware interrupt delivery via VoodooGPIO has fired at least once,
+        // sleep in 50 ms slices; otherwise sample PAD_CFG_DW0 every 4 ms during active wait.
+        const uint32_t sliceMs = (hwIrqDeliveredCount_ > 0u) ? 50u : 4u;
+        AbsoluteTime sliceDeadline{};
+        clock_interval_to_deadline(sliceMs, kMillisecondScale, reinterpret_cast<uint64_t *>(&sliceDeadline));
+        if (*reinterpret_cast<uint64_t *>(&sliceDeadline) > finalDeadline) {
+            *reinterpret_cast<uint64_t *>(&sliceDeadline) = finalDeadline;
+        }
+
+        const IOReturn sleepRc = commandGate_->commandSleep(&irqWaitToken_, sliceDeadline, THREAD_ABORTSAFE);
+        curPin = readIrqPinLevel();
+        if (curPin != lastSampledIrqLevel_) {
+            lastSampledIrqLevel_ = curPin;
+            lease_.recordIrqEdge();
+        }
+
+        status = lease_.classifyWait(args->lastSeq, args->expectedGen);
+        if (status != kFocalTechSPIWaitTimeout) {
+            break;
+        }
+        if (sleepRc == THREAD_INTERRUPTED) {
+            break;
+        }
+    }
+
+    args->outIrqSeq = lease_.irqSeq();
+    args->outCurrentGen = lease_.generation();
+    args->outPinLevel = readIrqPinLevel();
+    args->outWaitStatus = lease_.classifyWait(args->lastSeq, args->expectedGen);
+    return kIOReturnSuccess;
+}
+
+IOReturn FocalTechSPI::waitIrq(uint32_t lastSeq,
+                               uint32_t expectedGen,
+                               uint32_t timeoutMs,
+                               uint32_t *outIrqSeq,
+                               uint32_t *outCurrentGen,
+                               uint32_t *outPinLevel,
+                               uint32_t *outWaitStatus) {
+    if (!commandGate_ || !outIrqSeq || !outCurrentGen || !outPinLevel || !outWaitStatus) {
+        return kIOReturnBadArgument;
+    }
+    WaitIrqArgs args{};
+    args.lastSeq = lastSeq;
+    args.expectedGen = expectedGen;
+    args.timeoutMs = timeoutMs;
+    const IOReturn rc = commandGate_->runAction(&FocalTechSPI::gatedWaitIrqAction, &args);
+    if (rc == kIOReturnSuccess) {
+        *outIrqSeq = args.outIrqSeq;
+        *outCurrentGen = args.outCurrentGen;
+        *outPinLevel = args.outPinLevel;
+        *outWaitStatus = args.outWaitStatus;
+    }
+    return rc;
+}
