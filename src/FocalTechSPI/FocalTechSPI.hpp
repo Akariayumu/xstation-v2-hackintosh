@@ -73,7 +73,7 @@ private:
     bool locateAndParseAcpiFpnt(IOPCIDevice *pci);
     bool verifyFpntHid();
     bool mapGpioCommunities();
-    void configureIrqPadRoutingLocked();
+    void configureIrqPadRoutingLocked(bool enabled);
     void registerGpioInterrupt();
     void unregisterGpioInterrupt();
     void setGpioInterruptEnabled(bool enabled);
@@ -119,6 +119,9 @@ private:
     uint32_t resetPadOffset_{0};
     uint32_t irqBarIdx_{0};
     uint32_t irqPadOffset_{0};
+    uint32_t irqGpiIsOffset_{0};
+    uint32_t irqPinMask_{0};
+    volatile uint32_t *irqGpiIsReg_{nullptr};
     uint32_t savedIrqPadDw0_{0};
     bool irqPadModified_{false};
 

@@ -226,35 +226,40 @@ inline bool parseFpntCrs(const uint8_t *buf, size_t len, FpntResources *out) {
 
 struct TglGpioGroup {
     uint8_t  barIndex;
+    uint8_t  regNum;
     uint8_t  padCount;
     uint16_t padBar;
     uint16_t gnumBase;
 };
 
-// Exact 14 active GPCL groups from X-STATION V2 DSDT (dsdt.dsl:8987-9186).
+// Exact active GPCL groups from X-STATION V2 DSDT (dsdt.dsl:8987-9186) + VoodooGPIOTigerLakeLP.hpp.
 // GPI0 (INT34C5) exposes 4 IODeviceMemory ranges of 64 KB each:
 //   BAR 0: 0xFD6E0000 (port 0x006E0000, COM0)
 //   BAR 1: 0xFD6D0000 (port 0x006D0000, COM1)
-//   BAR 2: 0xFD6A0000 (port 0x006A0000, COM4)
+//   BAR 2: 0xFD6A0000 (port 0x006A0000, COM4; note regNum=2 is HVCMOS so GPP_E is regNum=3)
 //   BAR 3: 0xFD690000 (port 0x00690000, COM5)
-inline bool resolveTglLpGpioGnum(uint32_t gnum, uint32_t *outBarIndex, uint32_t *outPadOffset) {
+inline bool resolveTglLpGpioIrqRegs(uint32_t gnum,
+                                    uint32_t *outBarIndex,
+                                    uint32_t *outPadOffset,
+                                    uint32_t *outGpiIsOffset,
+                                    uint32_t *outPinMask) {
     if (!outBarIndex || !outPadOffset || gnum >= 0xFFFFu) {
         return false;
     }
 
     static const TglGpioGroup kGroups[] = {
-        {0u, 0x1Au, 0x0700u, 0x0000u},
-        {0u, 0x10u, 0x08A0u, 0x0020u},
-        {0u, 0x19u, 0x09A0u, 0x0040u},
-        {3u, 0x08u, 0x0700u, 0x0160u},
-        {1u, 0x08u, 0x0700u, 0x0060u},
-        {1u, 0x18u, 0x0780u, 0x0080u},
-        {1u, 0x15u, 0x0900u, 0x00A0u},
-        {1u, 0x18u, 0x0A50u, 0x00C0u},
-        {1u, 0x1Bu, 0x0BD0u, 0x00E0u},
-        {2u, 0x18u, 0x0700u, 0x0100u},
-        {2u, 0x19u, 0x0880u, 0x0120u},
-        {2u, 0x19u, 0x0A70u, 0x0140u},
+        {0u, 0u, 0x1Au, 0x0700u, 0x0000u},  // GPP_B
+        {0u, 1u, 0x10u, 0x08A0u, 0x0020u},  // GPP_T
+        {0u, 2u, 0x19u, 0x09A0u, 0x0040u},  // GPP_A
+        {3u, 0u, 0x08u, 0x0700u, 0x0160u},  // GPP_R
+        {1u, 0u, 0x08u, 0x0700u, 0x0060u},  // GPP_S
+        {1u, 1u, 0x18u, 0x0780u, 0x0080u},  // GPP_H
+        {1u, 2u, 0x15u, 0x0900u, 0x00A0u},  // GPP_D
+        {1u, 3u, 0x18u, 0x0A50u, 0x00C0u},  // GPP_U
+        {1u, 4u, 0x1Bu, 0x0BD0u, 0x00E0u},  // vGPIO
+        {2u, 0u, 0x18u, 0x0700u, 0x0100u},  // GPP_C
+        {2u, 1u, 0x19u, 0x0880u, 0x0120u},  // GPP_F
+        {2u, 3u, 0x19u, 0x0A70u, 0x0140u},  // GPP_E (HVCMOS occupies regNum 2)
     };
 
     for (size_t i = 0; i < sizeof(kGroups) / sizeof(kGroups[0]); ++i) {
@@ -262,15 +267,25 @@ inline bool resolveTglLpGpioGnum(uint32_t gnum, uint32_t *outBarIndex, uint32_t 
         if (gnum >= g.gnumBase && gnum < static_cast<uint32_t>(g.gnumBase) + g.padCount) {
             const uint32_t padIdx = gnum - g.gnumBase;
             const uint32_t padOffset = static_cast<uint32_t>(g.padBar) + padIdx * 0x10u;
-            if (padOffset + 8u > 0x10000u) {
+            if (padIdx >= 32u || padOffset + 8u > 0x10000u) {
                 return false;
             }
             *outBarIndex = g.barIndex;
             *outPadOffset = padOffset;
+            if (outGpiIsOffset) {
+                *outGpiIsOffset = 0x0100u + static_cast<uint32_t>(g.regNum) * 4u;
+            }
+            if (outPinMask) {
+                *outPinMask = (1u << padIdx);
+            }
             return true;
         }
     }
     return false;
+}
+
+inline bool resolveTglLpGpioGnum(uint32_t gnum, uint32_t *outBarIndex, uint32_t *outPadOffset) {
+    return resolveTglLpGpioIrqRegs(gnum, outBarIndex, outPadOffset, nullptr, nullptr);
 }
 
 inline uint32_t clampSpiSpeedHz(uint32_t targetHz) {
@@ -359,12 +374,18 @@ inline uint32_t configureResetPadDw0(uint32_t dw0, bool high) {
     return val;
 }
 
-inline uint32_t configureIrqPadDw0(uint32_t dw0, const FpntResources &res) {
+inline uint32_t configureIrqPadDw0(uint32_t dw0, const FpntResources &res, bool enabled = true) {
     uint32_t val = dw0;
     // Clear PMODE, RXDIS, GPIROUT* (VoodooGPIO uses GPI_IS/GPI_IE with GPIROUT*=0), RXINV, RXEVCFG
     val &= ~(kPadCfgDw0PmodeMask | kPadCfgDw0GpioRxDis |
              kPadCfgDw0RoutMask | kPadCfgDw0RxInv | kPadCfgDw0RxEvCfgMask);
     val |= kPadCfgDw0GpioTxDis;
+    if (!enabled) {
+        // Gate IRQ at the per-pad RXEVCFG=2 (Disabled) level so we NEVER call
+        // VoodooGPIO::disableInterrupt (which disables the shared GPI0 IOAPIC IRQ for Wacom touch).
+        val |= (0x2u << kPadCfgDw0RxEvCfgShift);
+        return val;
+    }
     if (res.irqEdgeTriggered) {
         if (res.irqActiveBoth) {
             val |= (0x3u << kPadCfgDw0RxEvCfgShift);

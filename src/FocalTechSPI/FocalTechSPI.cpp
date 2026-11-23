@@ -152,7 +152,7 @@ bool FocalTechSPI::locateAndParseAcpiFpnt(IOPCIDevice *pci) {
     }
 
     if (!fspi::resolveTglLpGpioGnum(res_.resetGnum, &resetBarIdx_, &resetPadOffset_) ||
-        !fspi::resolveTglLpGpioGnum(res_.irqGnum, &irqBarIdx_, &irqPadOffset_)) {
+        !fspi::resolveTglLpGpioIrqRegs(res_.irqGnum, &irqBarIdx_, &irqPadOffset_, &irqGpiIsOffset_, &irqPinMask_)) {
         FSPI_LOG("GPIO GNUM out of range (reset=%u irq=%u)", res_.resetGnum, res_.irqGnum);
         return false;
     }
@@ -189,14 +189,17 @@ bool FocalTechSPI::mapGpioCommunities() {
 
     if (gpioBarMaps_[0]->getLength() < 0x08A0u ||
         gpioBarMaps_[resetBarIdx_]->getLength() < resetPadOffset_ + 8u ||
-        gpioBarMaps_[irqBarIdx_]->getLength() < irqPadOffset_ + 8u) {
+        gpioBarMaps_[irqBarIdx_]->getLength() < irqPadOffset_ + 8u ||
+        gpioBarMaps_[irqBarIdx_]->getLength() < irqGpiIsOffset_ + 4u) {
         FSPI_LOG("GPI0 BAR length smaller than pad offset");
         return false;
     }
+    irqGpiIsReg_ = reinterpret_cast<volatile uint32_t *>(
+        reinterpret_cast<volatile uint8_t *>(gpioBarMaps_[irqBarIdx_]->getVirtualAddress()) + irqGpiIsOffset_);
     return true;
 }
 
-void FocalTechSPI::configureIrqPadRoutingLocked() {
+void FocalTechSPI::configureIrqPadRoutingLocked(bool enabled) {
     IOMemoryMap *map = (irqBarIdx_ < 4u) ? gpioBarMaps_[irqBarIdx_] : nullptr;
     if (!map || map->getVirtualAddress() == 0) {
         return;
@@ -212,10 +215,15 @@ void FocalTechSPI::configureIrqPadRoutingLocked() {
         savedIrqPadDw0_ = orig;
         irqPadModified_ = true;
     }
-    const uint32_t next = fspi::configureIrqPadDw0(orig, res_);
+    const uint32_t next = fspi::configureIrqPadDw0(orig, res_, enabled);
     if (next != orig) {
         *dw0Ptr = next;
         (void)*dw0Ptr;
+    }
+    if (irqGpiIsReg_) {
+        // RW1C: clear only our own pin's latched edge status bit in GPI_IS.
+        *irqGpiIsReg_ = irqPinMask_;
+        (void)*irqGpiIsReg_;
     }
 }
 
@@ -249,12 +257,15 @@ void FocalTechSPI::registerGpioInterrupt() {
     const int pin = static_cast<int>(res_.irqGnum);
     IOReturn rc = gpioIrqProvider_->registerInterrupt(pin, this, &FocalTechSPI::interruptOccurred, nullptr);
     if (rc == kIOReturnSuccess) {
+        // Unmask pin in VoodooGPIO GPI_IE once and keep GPI0 shared IOAPIC IRQ enabled;
+        // gate idle vs active strictly at our own pad's PAD_CFG_DW0.RXEVCFG!
+        (void)gpioIrqProvider_->enableInterrupt(pin);
         IOLockLock(hwLock_);
-        configureIrqPadRoutingLocked();
+        configureIrqPadRoutingLocked(false);
         IOLockUnlock(hwLock_);
         irqRegistered_ = true;
         irqEnabled_ = false;
-        FSPI_LOG("Registered GPIO IRQ pin %d via %s (masked while idle)", pin, gpioIrqProvider_->getMetaClass()->getClassName());
+        FSPI_LOG("Registered GPIO IRQ pin %d via %s (per-pad RXEVCFG gated)", pin, gpioIrqProvider_->getMetaClass()->getClassName());
     } else {
         FSPI_LOG("VoodooGPIO registerInterrupt(%d) returned 0x%x; fallback edge sampling active", pin, rc);
         OSSafeReleaseNULL(gpioIrqProvider_);
@@ -262,17 +273,15 @@ void FocalTechSPI::registerGpioInterrupt() {
 }
 
 void FocalTechSPI::setGpioInterruptEnabled(bool enabled) {
-    if (!irqRegistered_ || !gpioIrqProvider_) {
+    if (!irqRegistered_ || !hwLock_) {
         return;
     }
-    const int pin = static_cast<int>(res_.irqGnum);
-    if (enabled && !irqEnabled_) {
-        (void)gpioIrqProvider_->enableInterrupt(pin);
-        irqEnabled_ = true;
-    } else if (!enabled && irqEnabled_) {
-        (void)gpioIrqProvider_->disableInterrupt(pin);
-        irqEnabled_ = false;
+    IOLockLock(hwLock_);
+    irqEnabled_ = enabled;
+    if (powerState_ != 0u) {
+        configureIrqPadRoutingLocked(enabled);
     }
+    IOLockUnlock(hwLock_);
 }
 
 void FocalTechSPI::unregisterGpioInterrupt() {
@@ -660,6 +669,7 @@ void FocalTechSPI::stop(IOService *provider) {
     }
 
     sharedBufBytes_ = nullptr;
+    irqGpiIsReg_ = nullptr;
     OSSafeReleaseNULL(sharedBuf_);
     OSSafeReleaseNULL(bar0Map_);
     for (size_t i = 0; i < 4; ++i) {
@@ -706,16 +716,23 @@ IOReturn FocalTechSPI::setPowerState(unsigned long powerStateOrdinal, IOService 
         }
         IOLockUnlock(hwLock_);
     } else {
+        bool wokeFromSleep = false;
         IOLockLock(hwLock_);
         if (powerState_ == 0u) {
             restorePciD0Locked();
             hwInitD0Locked();
-            if (irqRegistered_) {
-                configureIrqPadRoutingLocked();
-            }
             powerState_ = 1u;
+            wokeFromSleep = true;
         }
         IOLockUnlock(hwLock_);
+        if (wokeFromSleep && irqRegistered_) {
+            if (gpioIrqProvider_) {
+                (void)gpioIrqProvider_->enableInterrupt(static_cast<int>(res_.irqGnum));
+            }
+            IOLockLock(hwLock_);
+            configureIrqPadRoutingLocked(irqEnabled_);
+            IOLockUnlock(hwLock_);
+        }
         if (commandGate_) {
             (void)commandGate_->runAction(&FocalTechSPI::gatedWakeRefreshAction);
         }
@@ -814,7 +831,10 @@ void FocalTechSPI::interruptOccurred(OSObject *owner, void * /*refCon*/, IOServi
     if (!self) {
         return;
     }
-    // Primary interrupt context: strictly lock-free atomic counters + commandWakeup only.
+    // Primary interrupt context: clear our own pin's RW1C GPI_IS edge latch, then atomic counters + wakeup.
+    if (volatile uint32_t *isReg = self->irqGpiIsReg_) {
+        *isReg = self->irqPinMask_;
+    }
     OSIncrementAtomic(&self->hwIrqDeliveredCount_);
     OSIncrementAtomic(&self->pendingHwIrqEdges_);
     if (IOCommandGate *gate = self->commandGate_) {

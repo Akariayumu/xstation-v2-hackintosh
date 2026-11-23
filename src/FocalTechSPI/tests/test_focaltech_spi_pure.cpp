@@ -222,6 +222,32 @@ void testComputeLpssCsControlV2() {
     assert(fspi::computeLpssCsControl(0x00002003u, 0u, true, true) == 0x00002001u);
 }
 
+void testGpiIsResolutionAndIdlePadGate() {
+    uint32_t barIdx = 99, padOff = 0, gpiIsOff = 0, pinMask = 0;
+    // Live FPNT IRQ GNUM 323 (GPP_E3, reg_num=3 in COM4 BAR 2): pad=0x0AA0, GPI_IS=0x010C, mask=1<<3
+    assert(fspi::resolveTglLpGpioIrqRegs(323u, &barIdx, &padOff, &gpiIsOff, &pinMask));
+    assert(barIdx == 2u);
+    assert(padOff == 0x0AA0u);
+    assert(gpiIsOff == 0x010Cu);
+    assert(pinMask == (1u << 3));
+
+    // GPP_C8 (GNUM 264, reg_num=0 in COM4 BAR 2): pad=0x0780, GPI_IS=0x0100, mask=1<<8
+    assert(fspi::resolveTglLpGpioIrqRegs(264u, &barIdx, &padOff, &gpiIsOff, &pinMask));
+    assert(barIdx == 2u);
+    assert(padOff == 0x0780u);
+    assert(gpiIsOff == 0x0100u);
+    assert(pinMask == (1u << 8));
+
+    // Per-pad RXEVCFG gating: disabled (2<<25) when idle so GPI0 shared IOAPIC IRQ is never disabled
+    fspi::FpntResources resBoth{};
+    resBoth.irqEdgeTriggered = true;
+    resBoth.irqActiveBoth = true;
+    const uint32_t dw0Idle = fspi::configureIrqPadDw0(0x84000100u, resBoth, false);
+    assert((dw0Idle & fspi::kPadCfgDw0RxEvCfgMask) == (0x2u << fspi::kPadCfgDw0RxEvCfgShift));
+    const uint32_t dw0Active = fspi::configureIrqPadDw0(dw0Idle, resBoth, true);
+    assert((dw0Active & fspi::kPadCfgDw0RxEvCfgMask) == (0x3u << fspi::kPadCfgDw0RxEvCfgShift));
+}
+
 }  // namespace
 
 int main() {
@@ -232,6 +258,7 @@ int main() {
     testSessionLeaseSleepRollover();
     testHidFilterBatchIrqEdgesAndTransferDeadline();
     testComputeLpssCsControlV2();
+    testGpiIsResolutionAndIdlePadGate();
     std::printf("All FocalTechSPIPure tests passed\n");
     return 0;
 }
