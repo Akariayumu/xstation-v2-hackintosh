@@ -200,6 +200,28 @@ void testHidFilterBatchIrqEdgesAndTransferDeadline() {
     assert((rstLo & 1u) == 0u);
 }
 
+void testComputeLpssCsControlV2() {
+    // Tiger Lake-LP (LPSS_CNL_SSP / GSPI_VERSION_2):
+    // SPI_CS_CONTROL (0x224) bit 12+cs is INACTIVE polarity (1 = inactive HIGH for active-low CS),
+    // bit 1 is CS_STATE (1 = DEASSERT, 0 = ASSERT), bits [9:8] = CS_SEL, bit 0 = CS_MODE_SW.
+    const uint32_t idleCs0 = fspi::computeLpssCsControl(0x00003000u, 0u, false, false);
+    assert(idleCs0 == 0x00003003u);
+    const uint32_t activeCs0 = fspi::computeLpssCsControl(idleCs0, 0u, false, true);
+    assert(activeCs0 == 0x00003001u);
+
+    // Even if SPI_CS_CONTROL was previously zeroed (0x0), active-low CS0 must set bit 12 (0x1000)
+    assert(fspi::computeLpssCsControl(0u, 0u, false, false) == 0x00001003u);
+    assert(fspi::computeLpssCsControl(0u, 0u, false, true) == 0x00001001u);
+
+    // Active-low CS1 sets CS_SEL=1 (0x0100) and CS_1_POL=1 (0x2000) while preserving CS_0_POL
+    assert(fspi::computeLpssCsControl(0x00001003u, 1u, false, false) == 0x00003103u);
+    assert(fspi::computeLpssCsControl(0x00003103u, 1u, false, true) == 0x00003101u);
+
+    // Active-high CS0 clears CS_0_POL (inactive LOW = 0)
+    assert(fspi::computeLpssCsControl(0x00003003u, 0u, true, false) == 0x00002003u);
+    assert(fspi::computeLpssCsControl(0x00002003u, 0u, true, true) == 0x00002001u);
+}
+
 }  // namespace
 
 int main() {
@@ -209,6 +231,7 @@ int main() {
     testComputeSscr0();
     testSessionLeaseSleepRollover();
     testHidFilterBatchIrqEdgesAndTransferDeadline();
+    testComputeLpssCsControlV2();
     std::printf("All FocalTechSPIPure tests passed\n");
     return 0;
 }

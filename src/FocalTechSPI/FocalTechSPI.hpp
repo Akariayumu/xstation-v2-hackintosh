@@ -83,6 +83,7 @@ private:
     void setCsActiveLocked(bool active);
     void drainRxFifoLocked();
     void hwInitD0Locked();
+    uint32_t runLoopbackSelfTestLocked();
     void hwEnterD3Locked();
     void restorePciD0Locked();
     IOReturn spiTransferLocked(uint32_t length);
@@ -147,8 +148,7 @@ private:
 
     uint32_t currentSpeedHz_{4000000u};
     uint8_t currentMode_{0u};
-    uint32_t csIdleReg_{0u};
-    uint32_t csActiveReg_{0u};
+    uint32_t bootCsControl_{0u};
     uint8_t powerState_{0u};
     bool pmInitialized_{false};
 };

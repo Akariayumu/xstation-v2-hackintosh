@@ -26,6 +26,7 @@ static constexpr uint32_t kRegSscr1               = 0x004u;
 static constexpr uint32_t kRegSssr                = 0x008u;
 static constexpr uint32_t kRegSsdr                = 0x010u;
 static constexpr uint32_t kRegSsto                = 0x028u;
+static constexpr uint32_t kRegSspsp               = 0x02Cu;
 static constexpr uint32_t kRegSsitf               = 0x044u;
 static constexpr uint32_t kRegSsirf               = 0x048u;
 static constexpr uint32_t kRegLpssPrivClockParams = 0x200u;
@@ -44,13 +45,18 @@ static constexpr uint32_t kSssrBsy = (1u << 4);  // SSP Busy
 static constexpr uint32_t kSssrRor = (1u << 7);  // Receive FIFO Overrun
 
 // SSCR1 bit definitions
-static constexpr uint32_t kSscr1Spo = (1u << 3);  // Motorola SPI SSPSCLK Polarity
-static constexpr uint32_t kSscr1Sph = (1u << 4);  // Motorola SPI SSPSCLK Phase
+static constexpr uint32_t kSscr1Lbm = (1u << 2);   // Internal Loop-Back Mode
+static constexpr uint32_t kSscr1Spo = (1u << 3);   // Motorola SPI SSPSCLK Polarity
+static constexpr uint32_t kSscr1Sph = (1u << 4);   // Motorola SPI SSPSCLK Phase
+static constexpr uint32_t kSscr1Ifs = (1u << 16);  // Invert Frame Signal
 
-// LPSS private register bit definitions
+// LPSS private register bit definitions (LPSS_CNL_SSP / GSPI_VERSION_2)
 static constexpr uint32_t kLpssResetRelease    = 0x07u;  // Func + DMA reset released
 static constexpr uint32_t kLpssCsSwMode        = (1u << 0);
-static constexpr uint32_t kLpssCsHigh          = (1u << 1);
+static constexpr uint32_t kLpssCsStateDeassert = (1u << 1);  // GSPIv2: 1=DEASSERT, 0=ASSERT
+static constexpr uint32_t kLpssCsSelShift      = 8u;
+static constexpr uint32_t kLpssCsSelMask       = (0x3u << 8);
+static constexpr uint32_t kLpssCsPol0Shift     = 12u;        // GSPIv2: 1=inactive HIGH (active-low CS)
 static constexpr uint32_t kLpssClockGateForceOn = 0x03u;
 
 // Intel PCH PAD_CFG_DW0 bits
@@ -320,6 +326,28 @@ inline uint32_t ensureLpssClockParams(uint32_t rawClk) {
         return 0x80010003u;
     }
     return rawClk | 0x80000001u;
+}
+
+// Compute SPI_CS_CONTROL (0x224) for LPSS_CNL_SSP / GSPI_VERSION_2:
+//   bit 0     = CS_MODE_SW (1)
+//   bit 1     = CS_STATE (1 = DEASSERT / idle, 0 = ASSERT / active)
+//   bits[9:8] = CS_SEL (0 = CS0, 1 = CS1)
+//   bit 12+cs = CS_x_POL INACTIVE polarity (1 = inactive HIGH for active-low CS, 0 = inactive LOW)
+inline uint32_t computeLpssCsControl(uint32_t origCsCtrl,
+                                     uint16_t deviceSelect,
+                                     bool csPolarityHigh,
+                                     bool assertCs) {
+    const uint32_t cs = static_cast<uint32_t>(deviceSelect) & 0x3u;
+    const uint32_t polBit = 1u << (kLpssCsPol0Shift + (cs & 0x1u));
+    uint32_t val = origCsCtrl & ~(kLpssCsSwMode | kLpssCsStateDeassert | kLpssCsSelMask | polBit);
+    val |= kLpssCsSwMode | (cs << kLpssCsSelShift);
+    if (!csPolarityHigh) {
+        val |= polBit;  // Active-low CS -> inactive polarity HIGH
+    }
+    if (!assertCs) {
+        val |= kLpssCsStateDeassert;
+    }
+    return val;
 }
 
 inline uint32_t configureResetPadDw0(uint32_t dw0, bool high) {
