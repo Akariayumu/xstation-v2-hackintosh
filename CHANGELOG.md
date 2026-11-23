@@ -8,6 +8,19 @@
 
 ---
 
+## v2.0.2（11-23）电源键一体指纹（FocalTech FTE3600 / FW9369）内核 SPI 驱动与锁屏免密解锁
+
+- **问题**：本机实体电源键集成了敦泰 `FTE3600`（实测内部型号 `FW9369`，`64×80`）SPI 电容指纹传感器，挂在 Intel Tiger Lake LPSS GSPI #1（`00:1e.3` `8086:a0ab`）与 `INT34C5` GPIO（Reset `GPP_E7` + 中断 `GPP_E3`）下，macOS 无原生驱动；在自研驱动推进中先后遇到三道硬件陷阱：① GSPI 控制器上电后 `LPSS_PRIV_CLOCK_PARAMS` 分频器为 `0` 导致 `SSSR.BSY` 死锁超时；② Tiger Lake GSPIv2 默认自动硬件片选每帧翻转且 `CS_0_POL` 极性被清零，导致传感器 MISO 全程回 `0x00`；③ 直接在 `INT34C5` 上调用 `VoodooGPIO::disableInterrupt` 会连带关闭共享父级 `GPI0` GIC 线，导致同挂在 `INT34C5` 下的 Wacom `WCOM4815` 触摸屏瞬间冻结卡死。
+- **思路**：
+  1. 在 `src/FocalTechSPI` 实现轻量级内核驱动 `FocalTechSPI.kext`：初始化 `LPSS_PRIV_CLOCK_PARAMS = 0x80010003` 打开 120 MHz 功能时钟（`SCR=29` 精确输出 `4 MHz` SPI MODE 0），并在 `SPI_CS_CONTROL`（`0x224`）保留 bit 12（`CS_0_POL` 空闲高电平），通过 `0xF003` / `0xF001` 手动在整个多字节命令帧内保持 `CS0#` 低电平；
+  2. 彻底绕开 `VoodooGPIO` 的父级中断开关，直接映射 `INT34C5` Community 4（`BAR2`）仅操作 `GPP_E3` 单个 Pad 的 `PADCFG_DW0.RXEVCFG`（启停边沿检测）与 `GPI_IS`（`BAR2 + 0x010C`，写 `1<<3` 清中断），对同控制器的触摸屏与手写笔零干扰；同时接入 `IOPMPowerState`（系统睡眠自动切入 `D3hot` 并递增 `sessionGeneration` 唤醒阻塞客户端），不阻塞 S0ix `PC8` 深睡；
+  3. 配套开发用户态套件 [XFinger](https://github.com/Akariayumu/XFinger)（`libfte3600core.dylib` + `xfingerd` 四重门禁守护进程 + `XFinger.app` 菜单栏/设置工具），针对 `3.2×4.0 mm` 窄电源键实现 12 步智能空间去重连通录入、`35 ms` 贴稳 + 3 帧连拍、`3×3` 跨样本拼接马赛克与 32 槽位自适应学习；同步更新 `tools/powerkey/PowerKeyDialog.swift` 在锁屏态及 `org.xstation.xfinger.willUnlock` 2.5 秒窗口内抑制关机面板弹出。
+- **改动**：
+  - 新增 `src/FocalTechSPI/`（内核扩展源码、纯逻辑单测与 `FocalTechSPI.kext` 构建产物）。
+  - 更新 `tools/powerkey/{PowerKeyDialog.swift,PowerKeyPolicy.swift}` 及单测，新增锁屏与指纹解锁防误弹守卫。
+  - 更新 `tools/s0ix/stage_usb_efi.py` 支持 `--extra-kext` 注入外置测试 U 盘（保持 `WriteFlash = False`）。
+- **结果**：外置测试 U 盘实机验证认出 `FocalTech 0x9369 (64x80)`，触摸屏丝滑无影响，桌面静置 `0.0%` CPU，锁屏轻触电源键免密解锁进桌面且不误弹关机面板。
+
 ## v2.0.1（11-17）CPU/核显零唤醒损耗传感器导出与插电/电池分离休眠策略
 
 - **问题**：一是 macOS 用户态在 Tiger Lake 上无法直接读取 CPU 封装/核心温度与核显实时频率，若强行在内核做 `FORCEWAKE` 轮询又会破坏核显 `RC6` 省电；二是实测发现即便电量已达 `100%`（`Amperage = 0`），本机原厂 EC 在插电浮充态下每隔 55–84 秒仍会拉高共享 `GPE 0x6E` 上报状态，若在插电满电时放开 `PWRB` 的 `GPE 0x6E` S0 唤醒会导致休眠约一分钟后自动误亮屏。

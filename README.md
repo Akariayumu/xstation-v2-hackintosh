@@ -46,7 +46,7 @@ i7-1165G7 / Iris Xe 二合一平板电脑上的 macOS Sequoia OpenCore EFI、ACP
 | 摄像头 ×2 | 🟡 | QuickTime 可用；Photo Booth 预览崩溃 | — |
 | 读卡器 | ⬜ | 已识别，未插卡测试 | — |
 | 雷电 | ❌ | 集成雷电（NHI PCIe 隧道）在 macOS 无驱动，接口按 USB-C + DP Alt Mode 使用 | — |
-| 指纹 | ❌ | 无法适配 | — |
+| 指纹（电源键一体） | ✅ | 敦泰 FocalTech `FTE3600`（`FW9369` `64×80`，LPSS GSPI #1 `8086:a0ab`）：`src/FocalTechSPI` 内核驱动 + [XFinger](https://github.com/Akariayumu/XFinger) 锁屏免密解锁 | v2.0.2 |
 
 ## 性能基准（v2.0，连续 9 次 S0ix 睡眠唤醒后实测）
 
@@ -64,10 +64,11 @@ i7-1165G7 / Iris Xe 二合一平板电脑上的 macOS Sequoia OpenCore EFI、ACP
 
 ## 配套软件推荐（平板触控与低功耗场景定制）
 
-针对本机 **二合一触控平板形态** 与 **Tiger Lake S0ix 现代待机低功耗要求**，配套开发并维护了以下三款原生 macOS 工具（均无需安装 `Xcode.app`，使用 Command Line Tools 即可编译）：
+针对本机 **二合一触控平板形态** 与 **Tiger Lake S0ix 现代待机低功耗要求**，配套开发并维护了以下四款原生 macOS 工具（均无需安装 `Xcode.app`，使用 Command Line Tools 即可编译）：
 
 | 项目 | 定位 | 核心特性与本机联动优化 |
 |---|---|---|
+| **[XFinger](https://github.com/Akariayumu/XFinger)** | 电源键一体指纹锁屏解锁 | 配合本仓 `src/FocalTechSPI` 内核驱动打通实体电源键集成的敦泰 `FTE3600`（`FW9369` `64×80`）SPI 传感器。支持 12 步智能去重连通拼图录入、`3×3` 跨样本拼接匹配与最高 32 槽位自适应学习；四重门禁校验后自动唤醒聚焦锁屏密码框完成免密解锁，联动 `PowerKeyDialog` 屏蔽误弹关机框，桌面常态 `0.0%` CPU 且不影响电池 S0ix `99% PC8` 深睡。 |
 | **[Xmonitor](https://github.com/Akariayumu/Xmonitor)** | 原生硬件监控套件 | 顶部同色菜单栏 + 壁纸层常驻小组件 + 8 页签深度控制台。进程内零子进程直读 `APERF/MPERF` 真实频率、RAPL 封装/核显功率、`SMCProcessor` 温度、`S0ixStandby` 零 Forcewake 核显 MHz、SMC 实时充放电净流、NVMe SMART 与 S0ix `CC7 / PC8 / DC9` 驻留诊断；熄屏与睡眠自动降为 `0 Hz` 零唤醒，常驻 CPU `< 0.3%`。 |
 | **[ScreenBoard](https://github.com/Akariayumu/ScreenBoard-for-Mac)** | 仿 Win11 触摸屏幕键盘 | 专为拆下磁吸键盘后的纯平板触控模式打造。浮动面板不抢当前窗口输入焦点，支持底部铺满停靠、自由浮动与左右分体拇指布局；虚拟键码直通系统原生拼音输入法，支持长按备选符号、按词删改移动与点按文本框自动弹出；锁屏/休眠唤醒自动接力系统辅助键盘供触屏输密码，解锁回桌面自动关闭。 |
 | **[Wallpaper4Mac](https://github.com/Akariayumu/Wallpaper4Mac)** | 低功耗动态视频壁纸 | 原生菜单栏管理端 + 静音硬解播放内核 + `hevc_videotoolbox` 硬件转码脚本。针对本机功耗与窗口看门狗做了激进省电联动：关屏、S0ix 睡眠、切电池供电、全屏应用或前台焦点离开桌面满 5 秒自动暂停视频解码，触摸或键鼠操作瞬间无感恢复。 |
@@ -136,6 +137,7 @@ EFI/                      OpenCore EFI（v2.0）。第三方文件由脚本补�
 acpi/                     SSDT 源码（.dsl），编译结果与 EFI 中的 AML 逐字节一致
 patches/WhateverXe/       WhateverXe 0.8.2（及旧版 0.5.0）补丁、构建脚本与许可证
 patches/S0ixStandby/      S0ixStandby 0.5.4（-s0ixacnoecwake）补丁、构建脚本与许可证
+src/FocalTechSPI/         FocalTechSPI.kext 源码（LPSS GSPI #1 + INT34C5 GPIO 指纹传感器内核驱动）
 src/XSHIDDLog/            XSHIDDLog.kext 源码
 scripts/fetch-thirdparty.sh  下载并校验第三方组件，补齐 EFI
 thirdparty.lock           第三方发布包的 URL / SHA-256，以及每个文件的来源
