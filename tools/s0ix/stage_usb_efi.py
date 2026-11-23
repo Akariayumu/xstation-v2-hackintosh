@@ -359,11 +359,50 @@ def install_kext_bundle(
             td.cleanup()
 
 
+def _inspect_extra_kext(src: Path) -> tuple[str, str, str]:
+    """Inspect a .kext directory or .zip archive and return (bundle_name, executable, bundle_id)."""
+    temp_dirs: list[tempfile.TemporaryDirectory[str]] = []
+    try:
+        if src.is_dir() and src.suffix.lower() == ".kext":
+            bundle_dir = src
+            bundle_name = src.name
+        elif src.is_file() and src.suffix.lower() == ".zip":
+            td = tempfile.TemporaryDirectory(prefix="s0ix_extra_kext_")
+            temp_dirs.append(td)
+            extract_root = Path(td.name)
+            with zipfile.ZipFile(src, "r") as zf:
+                zf.extractall(extract_root)
+            candidates = [
+                p for p in extract_root.rglob("*.kext") if p.is_dir() and "__MACOSX" not in p.parts
+            ]
+            if not candidates:
+                raise ValueError(f"Archive {src} does not contain any .kext bundle")
+            bundle_dir = candidates[0]
+            bundle_name = bundle_dir.name
+        else:
+            raise FileNotFoundError(f"Extra kext source must be a .kext directory or .zip: {src}")
+
+        info_plist = bundle_dir / "Contents" / "Info.plist"
+        if not info_plist.is_file():
+            raise ValueError(f"Missing Contents/Info.plist in {bundle_dir}")
+        with info_plist.open("rb") as f:
+            info = plistlib.load(f)
+        executable = str(info.get("CFBundleExecutable") or "").strip()
+        bundle_id = str(info.get("CFBundleIdentifier") or "").strip()
+        if not executable:
+            raise ValueError(f"{bundle_name} Info.plist missing CFBundleExecutable")
+        return bundle_name, executable, bundle_id
+    finally:
+        for td in temp_dirs:
+            td.cleanup()
+
+
 def transform_config_plist(
     config: dict[str, Any],
     phase: int,
     wex_version: str | None = None,
     extra_boot_args: str | None = None,
+    extra_kext_entries: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Pure transformation of OpenCore config.plist dict for Phase 0, Phase 1, or Phase 4."""
     if phase not in (0, 1, 4):
@@ -492,6 +531,33 @@ def transform_config_plist(
         else:
             kernel_add.append(copy.deepcopy(S0IX_KEXT_ENTRY))
 
+    if extra_kext_entries:
+        active_kernel_add: list[dict[str, Any]] = cfg["Kernel"]["Add"]
+        for extra_entry in extra_kext_entries:
+            entry_copy = copy.deepcopy(extra_entry)
+            existing_extra = next(
+                (k for k in active_kernel_add if k.get("BundlePath") == entry_copy["BundlePath"]),
+                None,
+            )
+            if existing_extra is not None:
+                existing_extra.clear()
+                existing_extra.update(entry_copy)
+            else:
+                vi2c_idx = next(
+                    (i for i, k in enumerate(active_kernel_add) if k.get("BundlePath") == "VoodooI2C.kext"),
+                    None,
+                )
+                if vi2c_idx is not None:
+                    # Insert after VoodooI2C.kext (and any immediate VoodooI2C* satellite kexts)
+                    insert_at = vi2c_idx + 1
+                    while insert_at < len(active_kernel_add) and str(
+                        active_kernel_add[insert_at].get("BundlePath", "")
+                    ).startswith("VoodooI2C"):
+                        insert_at += 1
+                    active_kernel_add.insert(insert_at, entry_copy)
+                else:
+                    active_kernel_add.append(entry_copy)
+
     if extra_boot_args:
         extra = extra_boot_args.strip()
         if extra:
@@ -513,6 +579,7 @@ def stage_usb_efi(
     repo_root: Path | None = None,
     wex_kext: Path | None = None,
     s0ix_kext: Path | None = None,
+    extra_kexts: list[Path] | tuple[Path, ...] | None = None,
     verify_dsdt: Path | None = None,
     extra_boot_args: str | None = None,
     force: bool = False,
@@ -607,6 +674,33 @@ def stage_usb_efi(
                 expected_identifier="as.vit9696.SMCProcessor",
             )
 
+    extra_kext_infos: list[dict[str, str]] = []
+    extra_kext_entries: list[dict[str, Any]] = []
+    if extra_kexts:
+        for kext_src in extra_kexts:
+            bundle_name, executable, bundle_id = _inspect_extra_kext(Path(kext_src))
+            kinfo = install_kext_bundle(
+                Path(kext_src),
+                staged_kexts_dir,
+                bundle_name=bundle_name,
+                expected_executable=executable,
+                expected_identifier=bundle_id or None,
+            )
+            extra_kext_infos.append(kinfo)
+            ver_suffix = f" v{kinfo['version']}" if kinfo["version"] else ""
+            extra_kext_entries.append(
+                {
+                    "Arch": "x86_64",
+                    "BundlePath": bundle_name,
+                    "Comment": f"{executable}{ver_suffix} (staged extra kext)",
+                    "Enabled": True,
+                    "ExecutablePath": f"Contents/MacOS/{executable}",
+                    "MaxKernel": "",
+                    "MinKernel": "24.0.0",
+                    "PlistPath": "Contents/Info.plist",
+                }
+            )
+
     with src_config.open("rb") as f:
         base_cfg = plistlib.load(f)
 
@@ -615,6 +709,7 @@ def stage_usb_efi(
         phase=phase,
         wex_version=wex_info["version"] if wex_info else None,
         extra_boot_args=extra_boot_args,
+        extra_kext_entries=extra_kext_entries or None,
     )
 
     dsdt_report: dict[str, Any] | None = None
@@ -647,6 +742,7 @@ def stage_usb_efi(
         "boot_args": staged_cfg["NVRAM"]["Add"][APPLE_BOOT_GUID]["boot-args"],
         "wex_kext": wex_info,
         "s0ix_kext": s0ix_info,
+        "extra_kexts": extra_kext_infos,
         "dsdt_verification": dsdt_report,
         "warnings": warnings,
     }
@@ -688,6 +784,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Optional path to S0ixStandby.kext directory or Release .zip (Phase 1 and Phase 4).",
     )
     parser.add_argument(
+        "--extra-kext",
+        dest="extra_kexts",
+        action="append",
+        type=Path,
+        default=None,
+        help="Optional additional .kext directory or .zip to install and enable in Kernel -> Add (repeatable).",
+    )
+    parser.add_argument(
         "--verify-dsdt",
         type=Path,
         default=None,
@@ -717,6 +821,7 @@ def main(argv: list[str] | None = None) -> int:
             efi_src=args.efi_src,
             wex_kext=args.wex_kext,
             s0ix_kext=args.s0ix_kext,
+            extra_kexts=args.extra_kexts,
             verify_dsdt=args.verify_dsdt,
             extra_boot_args=args.extra_boot_args,
             force=args.force,
@@ -735,6 +840,8 @@ def main(argv: list[str] | None = None) -> int:
     if summary["s0ix_kext"]:
         s = summary["s0ix_kext"]
         print(f"     S0ixStandby.kext    : v{s['version']} (MacOS SHA256: {s['exec_sha256'][:16]}...)")
+    for ek in summary.get("extra_kexts") or []:
+        print(f"     {ek['bundle_name']:<20}: v{ek['version']} (MacOS SHA256: {ek['exec_sha256'][:16]}...)")
     if summary["dsdt_verification"]:
         d = summary["dsdt_verification"]
         print(

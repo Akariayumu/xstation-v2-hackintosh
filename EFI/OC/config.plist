@@ -723,6 +723,24 @@
 				<key>Arch</key>
 				<string>x86_64</string>
 				<key>BundlePath</key>
+				<string>FocalTechSPI.kext</string>
+				<key>Comment</key>
+				<string>FocalTechSPI 0.1.0 LPSS GSPI #1 (8086:a0ab) + FPNT GPIO for XFinger</string>
+				<key>Enabled</key>
+				<true/>
+				<key>ExecutablePath</key>
+				<string>Contents/MacOS/FocalTechSPI</string>
+				<key>MaxKernel</key>
+				<string>24.99.99</string>
+				<key>MinKernel</key>
+				<string>24.0.0</string>
+				<key>PlistPath</key>
+				<string>Contents/Info.plist</string>
+			</dict>
+			<dict>
+				<key>Arch</key>
+				<string>x86_64</string>
+				<key>BundlePath</key>
 				<string>AirportItlwm.kext</string>
 				<key>Comment</key>
 				<string>AirportItlwm Sequoia 2.4.0-alpha 738d4c6 (laobamac fork)</string>
