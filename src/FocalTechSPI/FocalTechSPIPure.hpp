@@ -15,7 +15,8 @@
 
 namespace fspi {
 
-static constexpr uint32_t kTglLpssSpiSrcClockHz = 100000000u;
+// PCI 8086:a0ab maps to cnl_spi_info in Linux drivers/mfd/intel-lpss-pci.c (120 MHz root clock)
+static constexpr uint32_t kTglLpssSpiSrcClockHz = 120000000u;
 static constexpr uint32_t kMinSpiSpeedHz        = 1000000u;
 static constexpr uint32_t kMaxSpiSpeedHz        = 8000000u;
 
@@ -24,10 +25,17 @@ static constexpr uint32_t kRegSscr0               = 0x000u;
 static constexpr uint32_t kRegSscr1               = 0x004u;
 static constexpr uint32_t kRegSssr                = 0x008u;
 static constexpr uint32_t kRegSsdr                = 0x010u;
+static constexpr uint32_t kRegSsto                = 0x028u;
+static constexpr uint32_t kRegSsitf               = 0x044u;
+static constexpr uint32_t kRegSsirf               = 0x048u;
 static constexpr uint32_t kRegLpssPrivClockParams = 0x200u;
 static constexpr uint32_t kRegLpssPrivResets      = 0x204u;
+static constexpr uint32_t kRegLpssSspReg          = 0x220u;
 static constexpr uint32_t kRegLpssCsControl       = 0x224u;
 static constexpr uint32_t kRegLpssClockGate       = 0x238u;
+static constexpr uint32_t kRegLpssRemapAddrLo     = 0x240u;
+static constexpr uint32_t kRegLpssRemapAddrHi     = 0x244u;
+static constexpr uint32_t kRegLpssCaps            = 0x2FCu;
 
 // SSSR bit definitions
 static constexpr uint32_t kSssrTnf = (1u << 2);  // Transmit FIFO Not Full
@@ -304,11 +312,31 @@ inline uint32_t computeSpiDeadlineMs(uint32_t length, uint32_t speedHz) {
     return (totalMs > 10000ull) ? 10000u : static_cast<uint32_t>(totalMs);
 }
 
+inline uint32_t ensureLpssClockParams(uint32_t rawClk) {
+    const uint32_t m = (rawClk >> 1) & 0x7FFFu;
+    const uint32_t n = (rawClk >> 16) & 0x7FFFu;
+    if (m == 0u || n == 0u) {
+        // QUIRK_CLOCK_DIVIDER_UNITY: M=1, N=1, CLK_EN=1, CLK_UPDATE=1 (120 MHz 1:1)
+        return 0x80010003u;
+    }
+    return rawClk | 0x80000001u;
+}
+
+inline uint32_t configureResetPadDw0(uint32_t dw0, bool high) {
+    uint32_t val = dw0;
+    val &= ~(kPadCfgDw0PmodeMask | kPadCfgDw0GpioTxDis | kPadCfgDw0GpioTxState);
+    if (high) {
+        val |= kPadCfgDw0GpioTxState;
+    }
+    return val;
+}
+
 inline uint32_t configureIrqPadDw0(uint32_t dw0, const FpntResources &res) {
     uint32_t val = dw0;
+    // Clear PMODE, RXDIS, GPIROUT* (VoodooGPIO uses GPI_IS/GPI_IE with GPIROUT*=0), RXINV, RXEVCFG
     val &= ~(kPadCfgDw0PmodeMask | kPadCfgDw0GpioRxDis |
              kPadCfgDw0RoutMask | kPadCfgDw0RxInv | kPadCfgDw0RxEvCfgMask);
-    val |= kPadCfgDw0GpioTxDis | kPadCfgDw0RoutIoApic;
+    val |= kPadCfgDw0GpioTxDis;
     if (res.irqEdgeTriggered) {
         if (res.irqActiveBoth) {
             val |= (0x3u << kPadCfgDw0RxEvCfgShift);

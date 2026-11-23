@@ -76,6 +76,7 @@ private:
     void configureIrqPadRoutingLocked();
     void registerGpioInterrupt();
     void unregisterGpioInterrupt();
+    void setGpioInterruptEnabled(bool enabled);
 
     uint32_t mmioRead32(uint32_t offset) const;
     void mmioWrite32(uint32_t offset, uint32_t value);
@@ -105,6 +106,8 @@ private:
     UInt8 pmCapOffset_{0};
     uint32_t savedBar0Low_{0};
     uint32_t savedBar0High_{0};
+    uint64_t bar0PhysAddr_{0};
+    uint32_t bootClockParams_{0};
     uint32_t savedClockParams_{0};
     bool bar0Is64Bit_{false};
 
@@ -120,6 +123,7 @@ private:
 
     IOService *gpioIrqProvider_{nullptr};
     bool irqRegistered_{false};
+    bool irqEnabled_{false};
     volatile SInt32 hwIrqDeliveredCount_{0};
     volatile SInt32 pendingHwIrqEdges_{0};
 

@@ -121,21 +121,21 @@ void testResolveTglLpGpioGnum() {
 }
 
 void testComputeSscr0() {
-    // 100 MHz / 4 MHz -> SCR = 24, DSS = 7 (8-bit), SSE = bit 7 (0x80)
-    const uint32_t sscr0_4m = fspi::computeSscr0(100000000u, 4000000u);
-    assert(sscr0_4m == ((24u << 8) | 0x87u));
+    // 8086:a0ab uses cnl_spi_info (120 MHz): 120 MHz / 4 MHz -> SCR = 29, DSS = 7 (8-bit), SSE = 0x80
+    assert(fspi::kTglLpssSpiSrcClockHz == 120000000u);
+    const uint32_t sscr0_4m = fspi::computeSscr0(fspi::kTglLpssSpiSrcClockHz, 4000000u);
+    assert(sscr0_4m == ((29u << 8) | 0x87u));
 
-    // Clamp > 8 MHz to 8 MHz: ceil(100,000,000 / 8,000,000) = 13 -> SCR = 12 (7.69 MHz <= 8 MHz)
-    // or integer divider ensuring bus clock <= clamped target:
-    const uint32_t sscr0_clamp_hi = fspi::computeSscr0(100000000u, 20000000u);
-    const uint32_t sscr0_8m = fspi::computeSscr0(100000000u, 8000000u);
+    // Clamp > 8 MHz to 8 MHz: 120,000,000 / 8,000,000 = 15 -> SCR = 14 (8.00 MHz <= 8 MHz)
+    const uint32_t sscr0_clamp_hi = fspi::computeSscr0(fspi::kTglLpssSpiSrcClockHz, 20000000u);
+    const uint32_t sscr0_8m = fspi::computeSscr0(fspi::kTglLpssSpiSrcClockHz, 8000000u);
     assert(sscr0_clamp_hi == sscr0_8m);
     const uint32_t scr_hi = (sscr0_clamp_hi >> 8) & 0xFFFu;
-    assert((100000000u / (scr_hi + 1u)) <= 8000000u);
+    assert((fspi::kTglLpssSpiSrcClockHz / (scr_hi + 1u)) <= 8000000u);
 
-    // Clamp 0 Hz to 1 MHz -> SCR = 99
-    const uint32_t sscr0_zero = fspi::computeSscr0(100000000u, 0u);
-    assert(sscr0_zero == ((99u << 8) | 0x87u));
+    // Clamp 0 Hz to 1 MHz -> 120 MHz / 1 MHz = 120 -> SCR = 119
+    const uint32_t sscr0_zero = fspi::computeSscr0(fspi::kTglLpssSpiSrcClockHz, 0u);
+    assert(sscr0_zero == ((119u << 8) | 0x87u));
 }
 
 void testSessionLeaseSleepRollover() {
@@ -178,14 +178,26 @@ void testHidFilterBatchIrqEdgesAndTransferDeadline() {
     const uint32_t deadline4m = fspi::computeSpiDeadlineMs(65536u, 4000000u);
     assert(deadline4m >= 600u && deadline4m < deadline1m);
 
-    // I1: IRQ PAD_CFG_DW0 routing helper configures EdgeBoth / EdgeActiveLow + IOxAPIC route
+    // I1 + M1: IRQ PAD_CFG_DW0 configures EdgeBoth + PMODE=0 WITHOUT GPIROUTIOXAPIC (uses GPI_IS/GPI_IE)
     fspi::FpntResources resBoth{};
     resBoth.irqEdgeTriggered = true;
     resBoth.irqActiveBoth = true;
-    const uint32_t dw0Both = fspi::configureIrqPadDw0(0x04000C00u, resBoth);
+    const uint32_t dw0Both = fspi::configureIrqPadDw0(0x04100C00u, resBoth);
     assert((dw0Both & (0x3u << 25)) == (0x3u << 25));  // RXEVCFG = 3 (Both edges)
-    assert((dw0Both & (1u << 20)) != 0u);              // GPIROUTIOXAPIC = 1
+    assert((dw0Both & (0xFu << 17)) == 0u);            // GPIROUT* = 0 for VoodooGPIO GPI_IS
     assert((dw0Both & (0xFu << 10)) == 0u);            // PMODE = 0 (GPIO)
+
+    // M1: LPSS_PRIV_CLOCK_PARAMS (0x200) initializes 0 -> unity 1:1 (M=1, N=1, EN=1, UPDATE=1)
+    assert(fspi::ensureLpssClockParams(0u) == 0x80010003u);
+    assert(fspi::ensureLpssClockParams(0x00020004u) == 0x80020005u);
+
+    // M1: Reset PAD_CFG_DW0 clears PMODE & GPIOTXDIS and drives GPIOTXSTATE
+    const uint32_t rstHi = fspi::configureResetPadDw0(0x04000D00u, true);
+    assert((rstHi & (0xFu << 10)) == 0u);
+    assert((rstHi & (1u << 8)) == 0u);
+    assert((rstHi & 1u) == 1u);
+    const uint32_t rstLo = fspi::configureResetPadDw0(rstHi, false);
+    assert((rstLo & 1u) == 0u);
 }
 
 }  // namespace

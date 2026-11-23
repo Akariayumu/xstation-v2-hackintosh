@@ -253,18 +253,32 @@ void FocalTechSPI::registerGpioInterrupt() {
         configureIrqPadRoutingLocked();
         IOLockUnlock(hwLock_);
         irqRegistered_ = true;
-        (void)gpioIrqProvider_->enableInterrupt(pin);
-        FSPI_LOG("Registered GPIO IRQ pin %d via %s", pin, gpioIrqProvider_->getMetaClass()->getClassName());
+        irqEnabled_ = false;
+        FSPI_LOG("Registered GPIO IRQ pin %d via %s (masked while idle)", pin, gpioIrqProvider_->getMetaClass()->getClassName());
     } else {
         FSPI_LOG("VoodooGPIO registerInterrupt(%d) returned 0x%x; fallback edge sampling active", pin, rc);
         OSSafeReleaseNULL(gpioIrqProvider_);
     }
 }
 
+void FocalTechSPI::setGpioInterruptEnabled(bool enabled) {
+    if (!irqRegistered_ || !gpioIrqProvider_) {
+        return;
+    }
+    const int pin = static_cast<int>(res_.irqGnum);
+    if (enabled && !irqEnabled_) {
+        (void)gpioIrqProvider_->enableInterrupt(pin);
+        irqEnabled_ = true;
+    } else if (!enabled && irqEnabled_) {
+        (void)gpioIrqProvider_->disableInterrupt(pin);
+        irqEnabled_ = false;
+    }
+}
+
 void FocalTechSPI::unregisterGpioInterrupt() {
     if (irqRegistered_ && gpioIrqProvider_) {
+        setGpioInterruptEnabled(false);
         const int pin = static_cast<int>(res_.irqGnum);
-        (void)gpioIrqProvider_->disableInterrupt(pin);
         (void)gpioIrqProvider_->unregisterInterrupt(pin);
         irqRegistered_ = false;
     }
@@ -293,12 +307,14 @@ void FocalTechSPI::mmioWrite32(uint32_t offset, uint32_t value) {
 
 void FocalTechSPI::setCsActiveLocked(bool active) {
     mmioWrite32(fspi::kRegLpssCsControl, active ? csActiveReg_ : csIdleReg_);
-    // Tiger Lake LPSS cs_clk_stays_gated quirk: briefly force clock gate ON so CS
-    // state propagates immediately to the physical pad even while SSP is idle.
+    // Tiger Lake LPSS cs_clk_stays_gated quirk: force clock gate ON so CS state
+    // propagates immediately to the physical pad; keep ON while CS is active.
     mmioWrite32(fspi::kRegLpssClockGate, fspi::kLpssClockGateForceOn);
     (void)mmioRead32(fspi::kRegLpssCsControl);
     IODelay(1);
-    mmioWrite32(fspi::kRegLpssClockGate, 0u);
+    if (!active) {
+        mmioWrite32(fspi::kRegLpssClockGate, 0u);
+    }
 }
 
 void FocalTechSPI::drainRxFifoLocked() {
@@ -308,7 +324,7 @@ void FocalTechSPI::drainRxFifoLocked() {
         }
         (void)mmioRead32(fspi::kRegSsdr);
     }
-    mmioWrite32(fspi::kRegSssr, fspi::kSssrRor);
+    mmioWrite32(fspi::kRegSssr, 0x002C0080u);  // PINT | TINT | TUR | ROR
 }
 
 void FocalTechSPI::restorePciD0Locked() {
@@ -337,24 +353,55 @@ void FocalTechSPI::hwInitD0Locked() {
     if (!bar0_) {
         return;
     }
+    // 1. Pulse LPSS reset and release FUNC + IDMA (intel_lpss_init_dev)
+    mmioWrite32(fspi::kRegLpssPrivResets, 0u);
+    (void)mmioRead32(fspi::kRegLpssPrivResets);
+    IODelay(5);
     mmioWrite32(fspi::kRegLpssPrivResets, fspi::kLpssResetRelease);
     (void)mmioRead32(fspi::kRegLpssPrivResets);
     IODelay(10);
 
-    if ((savedClockParams_ & 0x01u) != 0u &&
-        (mmioRead32(fspi::kRegLpssPrivClockParams) & 0x01u) == 0u) {
-        mmioWrite32(fspi::kRegLpssPrivClockParams, savedClockParams_);
-        (void)mmioRead32(fspi::kRegLpssPrivClockParams);
+    // 2. Program LPSS_PRIV_REMAP_ADDR (0x240/0x244)
+    if (bar0PhysAddr_ != 0ull) {
+        mmioWrite32(fspi::kRegLpssRemapAddrLo, static_cast<uint32_t>(bar0PhysAddr_ & 0xFFFFFFFFull));
+        mmioWrite32(fspi::kRegLpssRemapAddrHi, static_cast<uint32_t>(bar0PhysAddr_ >> 32));
     }
 
+    // 3. Ensure LPSS_PRIV_CLOCK_PARAMS (0x200) M/N fractional divider & gate are enabled
+    const uint32_t hwClk = mmioRead32(fspi::kRegLpssPrivClockParams);
+    const uint32_t targetClk = fspi::ensureLpssClockParams(savedClockParams_ != 0u ? savedClockParams_ : hwClk);
+    savedClockParams_ = targetClk;
+    mmioWrite32(fspi::kRegLpssPrivClockParams, targetClk & ~0x80000000u);
+    (void)mmioRead32(fspi::kRegLpssPrivClockParams);
+    IODelay(1);
+    mmioWrite32(fspi::kRegLpssPrivClockParams, targetClk);
+    (void)mmioRead32(fspi::kRegLpssPrivClockParams);
+    IODelay(5);
+
+    // 4. Force clock gate ON while configuring SSP registers
+    mmioWrite32(fspi::kRegLpssClockGate, fspi::kLpssClockGateForceOn);
+    (void)mmioRead32(fspi::kRegLpssClockGate);
+
+    // 5. Configure LPSS_CNL_SSP thresholds & two-step SSCR0 enable (spi-pxa2xx.c)
     mmioWrite32(fspi::kRegSscr0, 0u);
     (void)mmioRead32(fspi::kRegSscr0);
+    mmioWrite32(fspi::kRegSsirf, 0u);                        // SSIRF_RxThresh(1)
+    mmioWrite32(fspi::kRegSsitf, ((32u - 1u) << 8) | 55u);   // TxLo=32, TxHi=56
+    mmioWrite32(fspi::kRegSsto, 0u);
     drainRxFifoLocked();
-    setCsActiveLocked(false);
+    mmioWrite32(fspi::kRegLpssCsControl, csIdleReg_);
+    (void)mmioRead32(fspi::kRegLpssCsControl);
 
-    mmioWrite32(fspi::kRegSscr1, fspi::computeSscr1(currentMode_));
-    mmioWrite32(fspi::kRegSscr0, fspi::computeSscr0(fspi::kTglLpssSpiSrcClockHz, currentSpeedHz_));
+    const uint32_t sscr1 = fspi::computeSscr1(currentMode_) | (7u << 6) | (7u << 10);
+    const uint32_t sscr0 = fspi::computeSscr0(fspi::kTglLpssSpiSrcClockHz, currentSpeedHz_);
+    mmioWrite32(fspi::kRegSscr1, sscr1);
+    mmioWrite32(fspi::kRegSscr0, sscr0 & ~0x80u);  // Configure divider/format with SSE=0
     (void)mmioRead32(fspi::kRegSscr0);
+    mmioWrite32(fspi::kRegSscr0, sscr0);           // Enable SSE=1
+    (void)mmioRead32(fspi::kRegSscr0);
+
+    // Return clock gate to dynamic mode while CS is idle
+    mmioWrite32(fspi::kRegLpssClockGate, 0u);
 }
 
 void FocalTechSPI::hwEnterD3Locked() {
@@ -435,12 +482,13 @@ bool FocalTechSPI::start(IOService *provider) {
     IOLockUnlock(hwLock_);
 
     bar0Map_ = pciDevice_->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
-    if (!bar0Map_ || bar0Map_->getVirtualAddress() == 0 || bar0Map_->getLength() < 0x240u) {
+    if (!bar0Map_ || bar0Map_->getVirtualAddress() == 0 || bar0Map_->getLength() < 0x300u) {
         FSPI_LOG("Failed to map PCI BAR0 MMIO");
         stop(provider);
         return false;
     }
     bar0_ = reinterpret_cast<volatile uint8_t *>(bar0Map_->getVirtualAddress());
+    bar0PhysAddr_ = static_cast<uint64_t>(bar0Map_->getPhysicalAddress());
 
     sharedBuf_ = IOBufferMemoryDescriptor::inTaskWithOptions(
         kernel_task,
@@ -468,11 +516,18 @@ bool FocalTechSPI::start(IOService *provider) {
         return false;
     }
 
+    uint32_t lpssCaps = 0;
+    uint32_t activeClkParams = 0;
+    uint32_t initSssr = 0;
     IOLockLock(hwLock_);
     mmioWrite32(fspi::kRegLpssPrivResets, fspi::kLpssResetRelease);
     (void)mmioRead32(fspi::kRegLpssPrivResets);
-    savedClockParams_ = mmioRead32(fspi::kRegLpssPrivClockParams);
+    bootClockParams_ = mmioRead32(fspi::kRegLpssPrivClockParams);
+    savedClockParams_ = bootClockParams_;
     hwInitD0Locked();
+    lpssCaps = mmioRead32(fspi::kRegLpssCaps);
+    activeClkParams = mmioRead32(fspi::kRegLpssPrivClockParams);
+    initSssr = mmioRead32(fspi::kRegSssr);
     powerState_ = 1u;
     IOLockUnlock(hwLock_);
 
@@ -484,11 +539,22 @@ bool FocalTechSPI::start(IOService *provider) {
     pmInitialized_ = true;
     registerPowerDriver(this, gPowerStates, kPowerStateCount);
 
+    const uint32_t resetDw0 = *reinterpret_cast<const volatile uint32_t *>(
+        reinterpret_cast<const volatile uint8_t *>(gpioBarMaps_[resetBarIdx_]->getVirtualAddress()) + resetPadOffset_);
+    const uint32_t irqDw0 = *reinterpret_cast<const volatile uint32_t *>(
+        reinterpret_cast<const volatile uint8_t *>(gpioBarMaps_[irqBarIdx_]->getVirtualAddress()) + irqPadOffset_);
+
     setProperty("ACPI HID", "FTE3600");
     setProperty("SPI Speed Hz", static_cast<unsigned long long>(currentSpeedHz_), 32);
     setProperty("Reset GNUM", static_cast<unsigned long long>(res_.resetGnum), 32);
     setProperty("IRQ GNUM", static_cast<unsigned long long>(res_.irqGnum), 32);
     setProperty("IRQ Hardware Registered", irqRegistered_);
+    setProperty("Boot LPSS Clock Params", static_cast<unsigned long long>(bootClockParams_), 32);
+    setProperty("Active LPSS Clock Params", static_cast<unsigned long long>(activeClkParams), 32);
+    setProperty("LPSS Caps", static_cast<unsigned long long>(lpssCaps), 32);
+    setProperty("Initial SSSR", static_cast<unsigned long long>(initSssr), 32);
+    setProperty("Reset DW0", static_cast<unsigned long long>(resetDw0), 32);
+    setProperty("IRQ DW0", static_cast<unsigned long long>(irqDw0), 32);
 
     registerService();
     FSPI_LOG("Attached to 8086:a0ab (FPNT FTE3600 speed=%u Hz reset=%u irq=%u)",
@@ -641,9 +707,12 @@ bool FocalTechSPI::acquireClientSession(FocalTechSPIUserClient *client) {
     }
     IOLockUnlock(clientLock_);
 
-    if (acquired && commandGate_) {
-        bool active = true;
-        (void)commandGate_->runAction(&FocalTechSPI::gatedSetClientStateAction, &active);
+    if (acquired) {
+        setGpioInterruptEnabled(true);
+        if (commandGate_) {
+            bool active = true;
+            (void)commandGate_->runAction(&FocalTechSPI::gatedSetClientStateAction, &active);
+        }
     }
     return acquired;
 }
@@ -660,9 +729,12 @@ void FocalTechSPI::releaseClientSession(FocalTechSPIUserClient *client) {
     }
     IOLockUnlock(clientLock_);
 
-    if (released && commandGate_) {
-        bool active = false;
-        (void)commandGate_->runAction(&FocalTechSPI::gatedSetClientStateAction, &active);
+    if (released) {
+        setGpioInterruptEnabled(false);
+        if (commandGate_) {
+            bool active = false;
+            (void)commandGate_->runAction(&FocalTechSPI::gatedSetClientStateAction, &active);
+        }
     }
 }
 
@@ -778,13 +850,7 @@ IOReturn FocalTechSPI::setResetPin(uint32_t level) {
     }
     volatile uint32_t *dw0 = reinterpret_cast<volatile uint32_t *>(
         reinterpret_cast<volatile uint8_t *>(map->getVirtualAddress()) + resetPadOffset_);
-    uint32_t val = *dw0;
-    if (level != 0u) {
-        val |= fspi::kPadCfgDw0GpioTxState;
-    } else {
-        val &= ~fspi::kPadCfgDw0GpioTxState;
-    }
-    *dw0 = val;
+    *dw0 = fspi::configureResetPadDw0(*dw0, level != 0u);
     (void)*dw0;
     IOLockUnlock(hwLock_);
     return kIOReturnSuccess;
@@ -813,6 +879,8 @@ IOReturn FocalTechSPI::spiTransferLocked(uint32_t length) {
     uint64_t deadline = 0;
     clock_interval_to_deadline(deadlineMs, kMillisecondScale, &deadline);
 
+    mmioWrite32(fspi::kRegLpssClockGate, fspi::kLpssClockGateForceOn);
+    (void)mmioRead32(fspi::kRegLpssClockGate);
     drainRxFifoLocked();
     setCsActiveLocked(true);
 
