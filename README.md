@@ -5,7 +5,7 @@ i7-1165G7 / Iris Xe 二合一平板电脑上的 macOS Sequoia OpenCore EFI、ACP
 > **实验性项目。** 显卡与现代待机分别依赖社区驱动 [WhateverXe](https://github.com/b00t0x/WhateverXe)（0.8.2）和 [S0ixStandby](https://github.com/labrouss/S0ixStandby)（0.5.4）。
 > 请先用 U 盘启动验证，保留原系统和数据备份。本项目与 Apple、Intel 及整机厂商无关。
 
-当前版本：**EFI v2.0.1**（2026-11-17），macOS Sequoia 15.8.1（24H32），OpenCore 1.0.8，SMBIOS `MacBookPro16,2`。  
+当前版本：**EFI v2.0.2**（2026-11-24），macOS Sequoia 15.8.1（24H32），OpenCore 1.0.8，SMBIOS `MacBookPro16,2`。  
 旧版 `v0.1.55`（禁用睡眠基线）已归档在 [`v1` 分支](../../tree/v1)。
 
 ## 硬件
@@ -102,6 +102,7 @@ i7-1165G7 / Iris Xe 二合一平板电脑上的 macOS Sequoia OpenCore EFI、ACP
 | 手写笔 | v0.1.51–v0.1.52 | 笔数据被丢弃；触摸退回 5 ms 轮询 | VoodooI2C 2.9.1；上游 CI 版 VoodooGPIO（Tiger Lake LP） |
 | 功耗 / USB | v0.1.53–v0.1.55 | 关屏功耗偏高；USB 用的是临时全开映射 | NVMeFix；逐口插拔实测生成 UTBMap（归档为 `v1` 分支） |
 | **S0ix 现代待机** | **v2.0** | 无传统 S3；核显禁了 DC9 阻塞深睡；插电 94% 停充与 `GPE 0x6E` 充电脉冲导致秒醒 | 升级 WhateverXe 0.8.2 实现真 `DC9` 冷唤醒；`SSDT-DEEPIDLE` + `S0ixStandby 0.5.4` 打通 `SleepType=7` 与 GT 硬件复位；`SSDT-BATFULL` + `-s0ixacnoecwake` 解决插电整晚待机 |
+| **电源键指纹解锁** | **v2.0.2** | 电源键集成敦泰 `FTE3600`（`FW9369`）SPI 指纹无驱动；关闭共享 `INT34C5` 中断会冻死触摸屏 | 自研 `FocalTechSPI.kext`（LPSS GSPI #1 手动 `CS0#` + 单 Pad `GPP_E3` 边沿检测零触控干扰），配合 [XFinger](https://github.com/Akariayumu/XFinger) 实现 12 步去重录入、`3×3` 拼接匹配与锁屏免密解锁 |
 
 ### 按症状查
 
@@ -125,10 +126,11 @@ i7-1165G7 / Iris Xe 二合一平板电脑上的 macOS Sequoia OpenCore EFI、ACP
 ## 目录
 
 ```text
-EFI/                      OpenCore EFI（v2.0）。第三方文件由脚本补齐，见下
+EFI/                      OpenCore EFI（v2.0.2）。第三方文件由脚本补齐，见下
   OC/config.plist         已脱敏：SMBIOS 是占位符，不能直接启动
   OC/ACPI/                本机 8 张 SSDT（AML）
   OC/Kexts/UTBMap.kext    本机实测 USB 端口映射
+  OC/Kexts/FocalTechSPI.kext          本项目的电源键指纹 SPI 驱动（源码在 src/FocalTechSPI/）
   OC/Kexts/XSHIDDLog.kext 本项目的 HIDD 日志 kext（源码在 src/）
   OC/Kexts/WhateverXe.kext            WhateverXe 0.8.2 + 本项目补丁的编译结果
   OC/Kexts/S0ixStandby.kext           S0ixStandby 0.5.4 + 本项目补丁的编译结果
@@ -141,7 +143,7 @@ src/FocalTechSPI/         FocalTechSPI.kext 源码（LPSS GSPI #1 + INT34C5 GPIO
 src/XSHIDDLog/            XSHIDDLog.kext 源码
 scripts/fetch-thirdparty.sh  下载并校验第三方组件，补齐 EFI
 thirdparty.lock           第三方发布包的 URL / SHA-256，以及每个文件的来源
-EFI-sha256.txt            v2.0.1 EFI 中全部 66 个文件的 SHA-256（config.plist 除外）
+EFI-sha256.txt            v2.0.2 EFI 中全部 68 个文件的 SHA-256（config.plist 除外）
 tools/                    实用工具（tools/s0ix 确定性 U 盘构建与 DSDT 校验、电源键面板、USB/手写笔/电池工具）
 docs/                     硬件信息、各子系统调查记录与 S0ix 路线图
 CHANGELOG.md              各次突破的问题、思路和改动
@@ -157,7 +159,7 @@ THIRD_PARTY.md            第三方组件、版本和许可证
    ```
 
    脚本从各项目的 GitHub 发布页下载 14 个固定版本的发布包，逐个校验 SHA-256，取出 46 个文件放进 `EFI/`，
-   最后按 `EFI-sha256.txt` 校验 EFI 里全部 66 个文件。通过后得到的 EFI 与作者实机使用的 **v2.0.1** 逐字节一致
+   最后按 `EFI-sha256.txt` 校验 EFI 里全部 68 个文件。通过后得到的 EFI 与作者实机使用的 **v2.0.2** 逐字节一致
    （`config.plist` 除外）。Linux 和 macOS 都能运行。
 
 2. **生成自己的 SMBIOS。** 用 [GenSMBIOS](https://github.com/corpnewt/GenSMBIOS) 生成 `MacBookPro16,2`
@@ -215,6 +217,7 @@ THIRD_PARTY.md            第三方组件、版本和许可证
 - **显示与真 DC9 冷唤醒**：将 Tiger Lake 4K 显示时序保护和面板速率恢复迁移到 WhateverXe 0.8.2（[patches/WhateverXe](patches/WhateverXe)），移除 `-noDC9` 实现真 `DC9` 睡眠断电与冷训练点亮。
 - **S0ix 现代待机（电池 + 插电双模）**：通过 `SSDT-DEEPIDLE` 与 `S0ixStandby` 0.5.4 打通 `SleepType = 7`（`CC7`/`PC8` 99%）与核显硬件复位；编写 `SSDT-BATFULL` 与 `-s0ixacnoecwake`（[patches/S0ixStandby](patches/S0ixStandby)）解决 94% 停充判定与插电 `GPE 0x6E` 误唤醒，配套提供确定性 U 盘构建与 DSDT 二进制校验工具（[tools/s0ix](tools/s0ix)）。
 - **电源键**：查明按键时 EC 不发 SCI 是因为 EC 地址空间没被访问过，`SSDT-PWRBEC` 补一次读取即可；在 `SSDT-DEEPIDLE` 中补齐 `PWRB.PRW0` 支持电池睡眠电源键唤醒。
+- **电源键一体指纹解锁**：在 [src/FocalTechSPI](src/FocalTechSPI) 实现 Tiger Lake LPSS GSPI #1（`8086:a0ab`）与 `INT34C5` 单 Pad 中断驱动 `FocalTechSPI.kext`，配合用户态套件 [XFinger](https://github.com/Akariayumu/XFinger) 打通敦泰 `FTE3600`（`FW9369`）锁屏免密解锁。
 - **音频**：通过 Linux 反向验证，找到 ALC256 coef `0x10` bit9 是扬声器开关，写进 AppleALC layout 19。
 - **触摸与手写笔**：VoodooI2C 2.9.1 加本机 I²C 控制器（`0xa0e88086&0xFFFCFFFF`）匹配，配合 Tiger Lake LP 的 VoodooGPIO 中断驱动。
 - **USB**：逐口插拔实测，生成 USBToolBox 定制映射。

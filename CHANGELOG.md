@@ -16,10 +16,10 @@
   2. 彻底绕开 `VoodooGPIO` 的父级中断开关，直接映射 `INT34C5` Community 4（`BAR2`）仅操作 `GPP_E3` 单个 Pad 的 `PADCFG_DW0.RXEVCFG`（启停边沿检测）与 `GPI_IS`（`BAR2 + 0x010C`，写 `1<<3` 清中断），对同控制器的触摸屏与手写笔零干扰；同时接入 `IOPMPowerState`（系统睡眠自动切入 `D3hot` 并递增 `sessionGeneration` 唤醒阻塞客户端），不阻塞 S0ix `PC8` 深睡；
   3. 配套开发用户态套件 [XFinger](https://github.com/Akariayumu/XFinger)（`libfte3600core.dylib` + `xfingerd` 四重门禁守护进程 + `XFinger.app` 菜单栏/设置工具），针对 `3.2×4.0 mm` 窄电源键实现 12 步智能空间去重连通录入、`35 ms` 贴稳 + 3 帧连拍、`3×3` 跨样本拼接马赛克与 32 槽位自适应学习；同步更新 `tools/powerkey/PowerKeyDialog.swift` 在锁屏态及 `org.xstation.xfinger.willUnlock` 2.5 秒窗口内抑制关机面板弹出。
 - **改动**：
-  - 新增 `src/FocalTechSPI/`（内核扩展源码、纯逻辑单测与 `FocalTechSPI.kext` 构建产物）。
+  - 新增 `src/FocalTechSPI/`（内核扩展源码、纯逻辑单测与构建脚本），将编译产物合入 `EFI/OC/Kexts/FocalTechSPI.kext` 并在 `EFI/OC/config.plist` 中启用，同步更新 68 项 `EFI-sha256.txt`。
   - 更新 `tools/powerkey/{PowerKeyDialog.swift,PowerKeyPolicy.swift}` 及单测，新增锁屏与指纹解锁防误弹守卫。
   - 更新 `tools/s0ix/stage_usb_efi.py` 支持 `--extra-kext` 注入外置测试 U 盘（保持 `WriteFlash = False`）。
-- **结果**：外置测试 U 盘实机验证认出 `FocalTech 0x9369 (64x80)`，触摸屏丝滑无影响，桌面静置 `0.0%` CPU，锁屏轻触电源键免密解锁进桌面且不误弹关机面板。
+- **结果**：实机认出 `FocalTech 0x9369 (64x80)` 并写入内置 NVMe OpenCore 分区正式启用，触摸屏丝滑无影响，桌面静置 `0.0%` CPU，锁屏轻触电源键免密解锁进桌面且不误弹关机面板。
 
 ## v2.0.1（11-17）CPU/核显零唤醒损耗传感器导出与插电/电池分离休眠策略
 
